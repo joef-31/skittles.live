@@ -37,3 +37,39 @@ async function dbUpdateLiveSetScore({ matchId, setNumber, p1, p2, thrower }) {
     .eq("set_number", setNumber);
 }
 
+// ========================================================
+// SCORING LOCK SYSTEM
+// ========================================================
+
+// Create or refresh a scoring lock
+async function dbAcquireScoringLock(matchId, scorerName) {
+  const expiresAt = new Date(Date.now() + 60 * 1000).toISOString(); // 60 seconds
+
+  const { data, error } = await supabase
+    .from("scoring_locks")
+    .upsert({
+      match_id: matchId,
+      locked_by: scorerName,
+      expires_at: expiresAt
+    }, { onConflict: "match_id" })
+    .select()
+    .maybeSingle();
+
+  return { data, error };
+}
+
+// Release the lock
+async function dbReleaseScoringLock(matchId) {
+  await supabase.from("scoring_locks").delete().eq("match_id", matchId);
+}
+
+// Check existing lock
+async function dbCheckScoringLock(matchId) {
+  const { data, error } = await supabase
+    .from("scoring_locks")
+    .select("*")
+    .eq("match_id", matchId)
+    .maybeSingle();
+
+  return { data, error };
+}

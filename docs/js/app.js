@@ -1,3 +1,35 @@
+// =======================================================
+// SIMPLE HASH ROUTER — keeps view in sync with URL
+// =======================================================
+function handleRoute() {
+  const hash = window.location.hash || "#/tournaments";
+  const parts = hash.replace("#", "").split("/");
+
+  // #/tournaments
+  if (parts[1] === "tournaments") {
+    loadTournaments();
+    return;
+  }
+
+  // #/tournament/<tid>
+  if (parts[1] === "tournament" && parts[2]) {
+    loadTournamentView(parts[2]);
+    return;
+  }
+
+  // #/match/<mid>/<tid>
+  if (parts[1] === "match" && parts[2] && parts[3]) {
+    loadMatchDetail(parts[2], parts[3]);
+    return;
+  }
+
+  // fallback
+  loadTournaments();
+}
+
+// Listen for browser back/forward
+window.addEventListener("hashchange", handleRoute);
+
 // --------------------------------------------
 // BUILD THROW MODELS
 // --------------------------------------------
@@ -133,49 +165,58 @@ const setsChannelMatchList = supabase
   .subscribe();
 
 
-/// ==================================================================
-// SMOOTH UPDATE FOR LIVE MATCH DETAILS (NO FULL REFRESH)
 // ==================================================================
-
+// SMOOTH UPDATE FOR LIVE MATCH DETAILS (NO FORCED NAVIGATION)
+// ==================================================================
 async function smoothUpdateSetRow(updatedSet) {
   const setNumber = updatedSet.set_number;
   if (!setNumber) return;
 
-  // Find the set-block for this set
+  // Are we on the Match Detail page?
+  const onMatchDetailPage = document.querySelector(".top-card") !== null;
+
+  // Try to find the existing row for this set
   const block = document.querySelector(`.set-block[data-set="${setNumber}"]`);
+
+  // ----------------------------------------------------------
+  // CASE 1 — A NEW SET EXISTS IN DB BUT UI HASN’T DRAWN IT YET
+  // ----------------------------------------------------------
   if (!block) {
-    // If we don't have that block yet, just reload match detail once.
-    loadMatchDetail(window.currentMatchId, window.currentTournamentId);
+    // Only reload the match detail if the user is actually viewing it
+    if (onMatchDetailPage) {
+      // Only reload ONCE per new set
+      if (!window.lastSeenSet || setNumber > window.lastSeenSet) {
+        window.lastSeenSet = setNumber;
+        loadMatchDetail(window.currentMatchId, window.currentTournamentId);
+      }
+    }
     return;
   }
 
+  // From here on, we KNOW the user is on match detail and the block exists.
   const mainRow = block.querySelector('.set-main-row');
   if (!mainRow) return;
 
   const leftCell = mainRow.querySelector('.col.left');
   const rightCell = mainRow.querySelector('.col.right');
 
-  // Update small points in the set row
+  // Update small points
   if (leftCell) leftCell.textContent = updatedSet.score_player1 ?? "";
   if (rightCell) rightCell.textContent = updatedSet.score_player2 ?? "";
 
-  // If we know who won this set, adjust winner highlighting
+  // Winner highlight
   if (updatedSet.winner_player_id && window.scoringMatch) {
     const p1Id = window.scoringMatch.p1Id;
     const p2Id = window.scoringMatch.p2Id;
 
-    if (leftCell) leftCell.classList.remove("winner");
-    if (rightCell) rightCell.classList.remove("winner");
+    leftCell?.classList.remove("winner");
+    rightCell?.classList.remove("winner");
 
-    if (updatedSet.winner_player_id === p1Id && leftCell) {
-      leftCell.classList.add("winner");
-    }
-    if (updatedSet.winner_player_id === p2Id && rightCell) {
-      rightCell.classList.add("winner");
-    }
+    if (updatedSet.winner_player_id === p1Id) leftCell?.classList.add("winner");
+    if (updatedSet.winner_player_id === p2Id) rightCell?.classList.add("winner");
   }
 
-  // Update thrower label in scoring console if it's around
+  // Update thrower label in scoring console
   if (typeof scoringCurrentThrower !== "undefined") {
     scoringCurrentThrower = updatedSet.current_thrower || "p1";
 
@@ -186,18 +227,15 @@ async function smoothUpdateSetRow(updatedSet) {
           : window.scoringMatch.p2Name;
 
       const label = document.getElementById("scoring-current-thrower-label");
-      if (label) {
-        label.textContent = `${name} to throw`;
-      }
+      if (label) label.textContent = `${name} to throw`;
     }
   }
 
-  // If this set has just been won, update the overall match score in the header
+  // Update overall match score when set is won
   if (updatedSet.winner_player_id) {
     await updateOverallMatchScore();
   }
 }
-
 
 // ==================================================================
 // UPDATE OVERALL MATCH SCORE WHEN A SET IS WON
@@ -319,6 +357,10 @@ function buildThrowsTableHTML(model, p1Name, p2Name) {
 // --------------------------------------------
 
 async function loadTournaments() {
+  window.currentMatchId = null;
+  window.currentTournamentId = null;
+  window.lastSeenSet = null;
+
   showBackButton(null);
   updateScoreButtonVisibility(false);
   showLoading("Loading tournaments…");
@@ -359,7 +401,8 @@ async function loadTournaments() {
   document.querySelectorAll("[data-tid]").forEach((el) => {
     el.addEventListener("click", () => {
       const tid = el.getAttribute("data-tid");
-      loadTournamentView(tid);
+      // navigate via URL
+      window.location.hash = `#/tournament/${tid}`;
     });
   });
 }
@@ -369,7 +412,14 @@ async function loadTournaments() {
 // --------------------------------------------
 
 async function loadTournamentView(tournamentId) {
-  showBackButton(() => loadTournaments());
+  // Leaving match-detail: clear realtime match context
+  window.currentMatchId = null;
+  window.currentTournamentId = null;
+  window.lastSeenSet = null;
+
+  showBackButton(() => {
+    window.location.hash = "#/tournaments";
+  });
   updateScoreButtonVisibility(false);
   showLoading("Loading tournament…");
 
@@ -504,7 +554,8 @@ async function loadTournamentView(tournamentId) {
     el.addEventListener("click", () => {
       const mid = el.getAttribute("data-mid");
       const tid = el.getAttribute("data-tid");
-      loadMatchDetail(mid, tid);
+      // navigate via URL
+      window.location.hash = `#/match/${mid}/${tid}`;
     });
   });
 
@@ -631,7 +682,9 @@ async function loadTournamentView(tournamentId) {
 async function loadMatchDetail(matchId, tournamentId) {
   window.currentMatchId = matchId;
   window.currentTournamentId = tournamentId;
-  showBackButton(() => loadTournamentView(tournamentId));
+  showBackButton(() => {
+    window.location.hash = `#/tournament/${tournamentId}`;
+  });
   updateScoreButtonVisibility(true);
   showLoading("Loading match…");
 
@@ -869,4 +922,4 @@ async function loadMatchDetail(matchId, tournamentId) {
 // INITIAL LOAD
 // --------------------------------------------
 
-loadTournaments();
+handleRoute();

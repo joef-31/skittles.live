@@ -30,7 +30,7 @@ let scoringCurrentThrower = "p1";
 let scoringThrowHistory = [];
 
 // ===========================================================
-// INIT BUTTONS
+// INIT BUTTONS — NEW UI
 // ===========================================================
 
 function initScoringButtons() {
@@ -39,58 +39,61 @@ function initScoringButtons() {
   scoringButtonsContainer.innerHTML = "";
   scoringMissContainer.innerHTML = "";
 
-  // Miss (X)
+  // MAKE MISS BUTTON
   const missBtn = document.createElement("button");
-  missBtn.className = "score-btn special";
-  missBtn.textContent = "Miss (X)";
+  missBtn.className = "score-btn special big-btn";
+  missBtn.textContent = "X";
   missBtn.addEventListener("click", () => scoringAddScore(0, { isMiss: true }));
   scoringMissContainer.appendChild(missBtn);
 
-  // 1–12 buttons
+  // NUMBERS 1–12 in a 3×4 GRID
   for (let i = 1; i <= 12; i++) {
     const btn = document.createElement("button");
-    btn.className = "score-btn";
+    btn.className = "score-btn num-btn";
     btn.textContent = i;
     btn.addEventListener("click", () => scoringAddScore(i));
     scoringButtonsContainer.appendChild(btn);
   }
 
-  // Fault
+  // FAULT BUTTON
   const faultBtn = document.createElement("button");
-  faultBtn.className = "score-btn special wide";
-  faultBtn.textContent = "Fault";
+  faultBtn.className = "score-btn special big-btn fullwidth";
+  faultBtn.textContent = "FAULT";
   faultBtn.addEventListener("click", () => scoringAddScore(0, { isFault: true }));
   scoringButtonsContainer.appendChild(faultBtn);
 
-  // Undo
+  // UNDO BUTTON
   const undoBtn = document.createElement("button");
-  undoBtn.className = "score-btn danger wide";
-  undoBtn.textContent = "Undo";
+  undoBtn.className = "score-btn danger big-btn fullwidth";
+  undoBtn.textContent = "UNDO";
   undoBtn.addEventListener("click", scoringUndo);
   scoringButtonsContainer.appendChild(undoBtn);
 }
 
-// Make sure buttons exist once DOM is ready
 window.addEventListener("DOMContentLoaded", initScoringButtons);
 
 // ===========================================================
 // OPEN / CLOSE
 // ===========================================================
 
-function openScoringConsole() {
-  if (!scoringMatch) {
-    console.warn("Scoring console opened without a match loaded.");
+async function openScoringConsole() {
+  if (!scoringMatch) return;
+
+  // Check lock
+  const { data: lock } = await dbCheckScoringLock(scoringMatch.matchId);
+
+  const now = Date.now();
+  const expired = lock && lock.expires_at && new Date(lock.expires_at).getTime() < now;
+
+  if (lock && !expired) {
+    alert(`Scoring is currently locked by ${lock.locked_by}.`);
     return;
   }
+
+  // Acquire lock
+  await dbAcquireScoringLock(scoringMatch.matchId, "Scorer");
+
   scoringConsole.style.display = "block";
-}
-
-function closeScoringConsole() {
-  scoringConsole.style.display = "none";
-}
-
-if (scoringCloseBtn) {
-  scoringCloseBtn.addEventListener("click", closeScoringConsole);
 }
 
 // ===========================================================

@@ -631,3 +631,72 @@ h1 {
     font-size: 0.82rem;
   }
 }
+
+/* ================================================
+   SCORING CONSOLE — VISUAL UPGRADE
+   ================================================ */
+
+/* Make number buttons square + larger */
+.score-btn {
+  height: 60px !important;           /* Square shape */
+  font-size: 1.05rem !important;     /* Bigger numbers */
+  border-radius: 10px !important;
+  border: 1px solid rgba(255,255,255,0.35) !important;
+  background: rgba(255,255,255,0.08) !important;
+  color: #ffffff !important;
+}
+
+/* Hover effect — bright white */
+.score-btn:hover {
+  background: rgba(255,255,255,0.20) !important;
+  border-color: #ffffff !important;
+}
+
+/* Special buttons: Miss, Fault */
+.score-btn.special {
+  color: #ffffff !important;
+  border-color: rgba(255,255,255,0.6) !important;
+  background: rgba(62, 166, 255, 0.18) !important;
+}
+
+.score-btn.special:hover {
+  background: rgba(62, 166, 255, 0.30) !important;
+}
+
+/* Undo button: stronger red */
+.score-btn.danger {
+  border-color: rgba(255,82,82,0.75) !important;
+  background: rgba(255,82,82,0.15) !important;
+  color: #ff5252 !important;
+}
+
+.score-btn.danger:hover {
+  background: rgba(255,82,82,0.25) !important;
+}
+
+/* Increase spacing in the grid */
+.scoring-buttons-grid {
+  gap: 6px !important;
+  margin-top: 10px !important;
+}
+
+/* Miss button taller & matching style */
+#scoring-miss-container .score-btn {
+  height: 50px !important;
+  font-size: 1rem !important;
+  border-color: rgba(255,255,255,0.35) !important;
+  color: #ffffff !important;
+}
+
+/* Header improvements */
+#scoring-console-header .label {
+  font-size: 0.9rem;
+  letter-spacing: 0.12em;
+  color: #d6defa !important;
+}
+
+#scoring-console {
+  border: 1px solid rgba(255,255,255,0.14) !important;
+  background: linear-gradient(135deg, #16233c, #0a1224) !important;
+}
+
