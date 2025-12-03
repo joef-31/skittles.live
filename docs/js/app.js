@@ -48,70 +48,93 @@ function buildThrowsModel(throws, player1Id, player2Id) {
   return model;
 }
 
-// ==================================================================
+/// ==================================================================
 // SMOOTH UPDATE FOR LIVE MATCH DETAILS (NO FULL REFRESH)
 // ==================================================================
 
 async function smoothUpdateSetRow(updatedSet) {
   const setNumber = updatedSet.set_number;
+  if (!setNumber) return;
 
-  // ------- Find the existing set row in the DOM -------
-  const row = document.querySelector(`[data-set="${setNumber}"]`);
-
-  // If row doesn’t exist yet → create it (new set started)
-  if (!row) {
+  // Find the set-block for this set
+  const block = document.querySelector(`.set-block[data-set="${setNumber}"]`);
+  if (!block) {
+    // If we don't have that block yet, just reload match detail once.
     loadMatchDetail(window.currentMatchId, window.currentTournamentId);
     return;
   }
 
-  // ------- Update live set score (small points) -------
-  const p1 = row.querySelector('.set-p1');
-  const p2 = row.querySelector('.set-p2');
+  const mainRow = block.querySelector('.set-main-row');
+  if (!mainRow) return;
 
-  if (p1) p1.textContent = updatedSet.score_player1 ?? 0;
-  if (p2) p2.textContent = updatedSet.score_player2 ?? 0;
+  const leftCell = mainRow.querySelector('.col.left');
+  const rightCell = mainRow.querySelector('.col.right');
 
-  // ------- Update thrower label in scoring console -------
+  // Update small points in the set row
+  if (leftCell) leftCell.textContent = updatedSet.score_player1 ?? "";
+  if (rightCell) rightCell.textContent = updatedSet.score_player2 ?? "";
+
+  // If we know who won this set, adjust winner highlighting
+  if (updatedSet.winner_player_id && window.scoringMatch) {
+    const p1Id = window.scoringMatch.p1Id;
+    const p2Id = window.scoringMatch.p2Id;
+
+    if (leftCell) leftCell.classList.remove("winner");
+    if (rightCell) rightCell.classList.remove("winner");
+
+    if (updatedSet.winner_player_id === p1Id && leftCell) {
+      leftCell.classList.add("winner");
+    }
+    if (updatedSet.winner_player_id === p2Id && rightCell) {
+      rightCell.classList.add("winner");
+    }
+  }
+
+  // Update thrower label in scoring console if it's around
   if (typeof scoringCurrentThrower !== "undefined") {
     scoringCurrentThrower = updatedSet.current_thrower || "p1";
 
     if (window.scoringMatch) {
-      const name = scoringCurrentThrower === "p1"
-        ? window.scoringMatch.p1Name
-        : window.scoringMatch.p2Name;
+      const name =
+        scoringCurrentThrower === "p1"
+          ? window.scoringMatch.p1Name
+          : window.scoringMatch.p2Name;
 
       const label = document.getElementById("scoring-current-thrower-label");
-      if (label) label.textContent = `${name} to throw`;
+      if (label) {
+        label.textContent = `${name} to throw`;
+      }
     }
   }
 
-  // ------- Update overall set score if set was won -------
+  // If this set has just been won, update the overall match score in the header
   if (updatedSet.winner_player_id) {
-    updateOverallMatchScore();
+    await updateOverallMatchScore();
   }
 }
+
 
 // ==================================================================
 // UPDATE OVERALL MATCH SCORE WHEN A SET IS WON
 // ==================================================================
 
 async function updateOverallMatchScore() {
-  const { data: match } = await supabase
+  if (!window.currentMatchId) return;
+
+  const { data: match, error } = await supabase
     .from("matches")
     .select("final_sets_player1, final_sets_player2")
     .eq("id", window.currentMatchId)
     .maybeSingle();
 
-  if (!match) return;
+  if (error || !match) return;
 
-  const p1 = document.querySelector('.match-score-p1');
-  const p2 = document.querySelector('.match-score-p2');
-
-  if (p1) p1.textContent = match.final_sets_player1 ?? 0;
-  if (p2) p2.textContent = match.final_sets_player2 ?? 0;
+  const headerScore = document.querySelector(".top-card .top-score");
+  if (headerScore) {
+    headerScore.textContent =
+      (match.final_sets_player1 ?? 0) + " – " + (match.final_sets_player2 ?? 0);
+  }
 }
-
-
 
 // --------------------------------------------
 // BUILD THROWS TABLE HTML

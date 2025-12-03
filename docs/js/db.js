@@ -15,13 +15,13 @@ const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // ==================================================================
 
 const setsChannel = supabase
-  .channel('sets-realtime')
+  .channel("sets-realtime")
   .on(
-    'postgres_changes',
+    "postgres_changes",
     {
-      event: '*',
-      schema: 'public',
-      table: 'sets'
+      event: "*",
+      schema: "public",
+      table: "sets",
     },
     async (payload) => {
       if (!window.currentMatchId || !window.currentTournamentId) return;
@@ -29,7 +29,6 @@ const setsChannel = supabase
       const updated = payload.new;
       if (!updated) return;
 
-      // Only update if this set belongs to the match currently viewed
       if (updated.match_id !== window.currentMatchId) return;
 
       smoothUpdateSetRow(updated);
