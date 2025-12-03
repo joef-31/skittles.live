@@ -10,6 +10,29 @@ const SUPABASE_ANON_KEY =
 
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ===============================================================
+// REALTIME LISTENER — auto-update match view on score change
+// ===============================================================
+
+const setsChannel = supabase
+  .channel('sets-realtime')
+  .on(
+    'postgres_changes',
+    {
+      event: '*',         // listen for INSERT + UPDATE
+      schema: 'public',
+      table: 'sets'
+    },
+    async (payload) => {
+      // Only refresh if a match is currently open
+      if (window.currentMatchId && window.currentTournamentId) {
+        loadMatchDetail(window.currentMatchId, window.currentTournamentId);
+      }
+    }
+  )
+  .subscribe();
+
+
 // ===========================================================
 // DATABASE WRITE HELPERS
 // ===========================================================
