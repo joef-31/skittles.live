@@ -219,25 +219,28 @@ async function scoringAddScore(score, opts = {}) {
   scP1SetSP.textContent = scoringCurrentSetSP1;
   scP2SetSP.textContent = scoringCurrentSetSP2;
 
-  // ===== CHECK FOR SET WIN (50 POINT SET) =====
+  // ===============================================================
+  // CHECK FOR SET WIN (50 POINT SET)
+  // ===============================================================
   let winningPlayer = null;
 
   if (scoringCurrentSetSP1 === 50 && scoringCurrentSetSP2 < 50) {
     winningPlayer = scoringMatch.p1Id;
   }
+
   if (scoringCurrentSetSP2 === 50 && scoringCurrentSetSP1 < 50) {
     winningPlayer = scoringMatch.p2Id;
   }
 
   if (winningPlayer) {
-    // --- Mark set winner in DB ---
+    // Mark set winner
     await supabase
       .from("sets")
       .update({ winner_player_id: winningPlayer })
       .eq("match_id", scoringMatch.matchId)
       .eq("set_number", scoringMatch.currentSetNumber);
 
-    // --- Update final match set score ---
+    // Update match set scores
     if (winningPlayer === scoringMatch.p1Id) {
       scoringMatch.setsP1++;
     } else {
@@ -252,15 +255,13 @@ async function scoringAddScore(score, opts = {}) {
       })
       .eq("id", scoringMatch.matchId);
 
-    // --- Create next set row in DB ---
-    if (typeof dbCreateNextSet === "function") {
-      await dbCreateNextSet(
-        scoringMatch.matchId,
-        scoringMatch.currentSetNumber
-      );
-    }
+    // Create the next set
+    await dbCreateNextSet(
+      scoringMatch.matchId,
+      scoringMatch.currentSetNumber
+    );
 
-    // --- Reset for new set locally ---
+    // Reset local state for the new set
     scoringMatch.currentSetNumber++;
     scoringCurrentSetSP1 = 0;
     scoringCurrentSetSP2 = 0;
@@ -269,9 +270,10 @@ async function scoringAddScore(score, opts = {}) {
 
     scP1SetSP.textContent = "0";
     scP2SetSP.textContent = "0";
-    scCurrentThrowerLabel.textContent = scoringMatch.p1Name + " to throw";
+    scCurrentThrowerLabel.textContent =
+      scoringMatch.p1Name + " to throw";
 
-    return; // END set-win section — do NOT switch thrower
+    return; // END OF SET-WIN LOGIC — do NOT switch thrower
   }
 
   // ===== NORMAL THROWER SWITCH =====
@@ -281,77 +283,18 @@ async function scoringAddScore(score, opts = {}) {
     " to throw";
 
   // ===== SAVE SET SCORE + THROWER TO DB =====
-  if (typeof dbUpdateLiveSetScore === "function") {
-    await dbUpdateLiveSetScore({
-      matchId: scoringMatch.matchId,
-      setNumber: scoringMatch.currentSetNumber,
-      p1: scoringCurrentSetSP1,
-      p2: scoringCurrentSetSP2,
-      thrower: scoringCurrentThrower
-    });
-  }
+  await dbUpdateLiveSetScore({
+    matchId: scoringMatch.matchId,
+    setNumber: scoringMatch.currentSetNumber,
+    p1: scoringCurrentSetSP1,
+    p2: scoringCurrentSetSP2,
+    thrower: scoringCurrentThrower
+  });
 
-  // ===== REFRESH MATCH DETAIL IF CONSOLE CLOSED =====
+  // ===== REFRESH MATCH DETAIL ONLY IF CONSOLE IS CLOSED =====
   if (scoringConsole.style.display === "none") {
     loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
   }
-}
-
-// ===============================================================
-// CHECK FOR SET WIN
-// ===============================================================
-let winningPlayer = null;
-
-if (scoringCurrentSetSP1 === 50 && scoringCurrentSetSP2 < 50) {
-  winningPlayer = scoringMatch.p1Id;
-}
-
-if (scoringCurrentSetSP2 === 50 && scoringCurrentSetSP1 < 50) {
-  winningPlayer = scoringMatch.p2Id;
-}
-
-if (winningPlayer) {
-  // Mark set winner
-  await supabase
-    .from("sets")
-    .update({ winner_player_id: winningPlayer })
-    .eq("match_id", scoringMatch.matchId)
-    .eq("set_number", scoringMatch.currentSetNumber);
-
-  // Update match set scores
-  if (winningPlayer === scoringMatch.p1Id) {
-    scoringMatch.setsP1++;
-  } else {
-    scoringMatch.setsP2++;
-  }
-
-  await supabase
-    .from("matches")
-    .update({
-      final_sets_player1: scoringMatch.setsP1,
-      final_sets_player2: scoringMatch.setsP2
-    })
-    .eq("id", scoringMatch.matchId);
-
-  // CREATE THE NEXT SET
-  await dbCreateNextSet(
-    scoringMatch.matchId,
-    scoringMatch.currentSetNumber
-  );
-
-  // Reset local state for next set
-  scoringMatch.currentSetNumber++;
-  scoringCurrentSetSP1 = 0;
-  scoringCurrentSetSP2 = 0;
-  scoringThrowHistory = [];
-  scoringCurrentThrower = "p1";
-
-  scP1SetSP.textContent = "0";
-  scP2SetSP.textContent = "0";
-
-  scCurrentThrowerLabel.textContent = scoringMatch.p1Name + " to throw";
-
-  return; // stop here, do NOT switch thrower after set win
 }
 
 
