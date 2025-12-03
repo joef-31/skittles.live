@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Flash Mölkk</title>
+
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- External stylesheet -->
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+
+<body>
+  <div id="app-shell">
+    <div id="app-header">
+      <h1>FLASH MÖLKK</h1>
+      <div class="header-tools">
+        <button id="scoreBtn" class="header-btn" style="display:none;" title="Score this match">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="4" y="3" width="16" height="18" rx="3" ry="3" fill="none"
+                  stroke="currentColor" stroke-width="1.6" />
+            <rect x="7" y="5.5" width="10" height="4" rx="1"
+                  fill="none" stroke="currentColor" stroke-width="1.4" />
+            <rect x="7"  y="11" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+            <rect x="10.5" y="11" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+            <rect x="14" y="11" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+            <rect x="7"  y="15" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+            <rect x="10.5" y="15" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+            <rect x="14" y="15" width="3" height="3" rx="0.6"
+                  fill="none" stroke="currentColor" stroke-width="1.2" />
+          </svg>
+          <span class="header-btn-label">Score</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="backBtn">⬅ Back</div>
+
+    <div id="scoring-console" class="card">
+      <div id="scoring-console-header">
+        <div class="label">Scoring console (prototype)</div>
+        <button id="scoring-close-btn">Close ✕</button>
+      </div>
+
+      <div class="scoring-players">
+        <div class="scoring-player">
+          <div class="scoring-name" id="scoring-p1-name">Player 1</div>
+          <div class="scoring-scoreline">
+            Sets: <span id="scoring-p1-sets">0</span> |
+            Match SP: <span id="scoring-p1-sp">0</span>
+          </div>
+          <div class="scoring-current-set">
+            Set SP: <span id="scoring-p1-setsp">0</span>
+          </div>
+        </div>
+
+        <div class="scoring-player">
+          <div class="scoring-name" id="scoring-p2-name">Player 2</div>
+          <div class="scoring-scoreline">
+            Sets: <span id="scoring-p2-sets">0</span> |
+            Match SP: <span id="scoring-p2-sp">0</span>
+          </div>
+          <div class="scoring-current-set">
+            Set SP: <span id="scoring-p2-setsp">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="scoring-current-thrower">
+        Current throw: <span id="scoring-current-thrower-label">–</span>
+      </div>
+
+      <div id="scoring-miss-container"></div>
+      <div class="scoring-buttons-grid" id="scoring-buttons"></div>
+
+      <div class="scoring-footer">
+        This console currently updates the on-screen scores locally only.
+        Next step: wire this into Supabase so throws/sets are stored for real.
+      </div>
+    </div>
+
+    <div id="content"></div>
+  </div>
+
+  <!-- JS modules -->
+  <script src="js/db.js"></script>
+  <script src="js/scoring.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
