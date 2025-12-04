@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Flash Mölkk</title>
 
   <!-- Supabase JS v2 -->
@@ -16,7 +17,17 @@
     <div id="app-header">
       <h1>FLASH MÖLKK</h1>
       <div class="header-tools">
-        <button id="scoreBtn" class="header-btn" style="display:none;" title="Score this match">
+
+<select id="Profile" class="profile-select">
+    <option value="Guest">Guest</option>
+    <option value="Joe">Joe</option>
+    <option value="Ref1">Ref 1</option>
+    <option value="Ref2">Ref 2</option>
+    <option value="TabletA">Tablet A</option>
+    <option value="TabletB">Tablet B</option>
+  </select>
+
+        <button id="scoreBtn" class="header-btn" style="display:none;" title="Score this match"  data-locked="no">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <rect x="4" y="3" width="16" height="18" rx="3" ry="3" fill="none"
                   stroke="currentColor" stroke-width="1.6" />
@@ -47,6 +58,15 @@
         <div class="label">Scoring console (prototype)</div>
         <button id="scoring-close-btn">Close ✕</button>
       </div>
+
+    <div id="start-match-overlay" class="overlay">
+      <div class="overlay-inner">
+      <div class="overlay-title">Match not started</div>
+      <button id="start-match-btn">Start Match</button>
+      </div>
+    </div>
+
+
 
       <div class="scoring-players">
         <div class="scoring-player">

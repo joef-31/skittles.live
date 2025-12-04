@@ -29,6 +29,23 @@ let scoringCurrentSetSP2 = 0;
 let scoringCurrentThrower = "p1";
 let scoringThrowHistory = [];
 
+// Map: set_number -> set row including id
+let scoringSetsByNumber = {};
+
+// ===========================================================
+// OVERLAY HELPERS (Start Match overlay is optional)
+// ===========================================================
+
+function showStartMatchOverlay() {
+  const el = document.getElementById("start-match-overlay");
+  if (el) el.style.display = "flex";
+}
+
+function hideStartMatchOverlay() {
+  const el = document.getElementById("start-match-overlay");
+  if (el) el.style.display = "none";
+}
+
 // ===========================================================
 // INIT BUTTONS — NEW UI
 // ===========================================================
@@ -39,14 +56,7 @@ function initScoringButtons() {
   scoringButtonsContainer.innerHTML = "";
   scoringMissContainer.innerHTML = "";
 
-  // MAKE MISS BUTTON
-  const missBtn = document.createElement("button");
-  missBtn.className = "score-btn special big-btn";
-  missBtn.textContent = "X";
-  missBtn.addEventListener("click", () => scoringAddScore(0, { isMiss: true }));
-  scoringMissContainer.appendChild(missBtn);
-
-  // NUMBERS 1–12 in a 3×4 GRID
+  // NUMBERS 1–12 in grid
   for (let i = 1; i <= 12; i++) {
     const btn = document.createElement("button");
     btn.className = "score-btn num-btn";
@@ -55,11 +65,22 @@ function initScoringButtons() {
     scoringButtonsContainer.appendChild(btn);
   }
 
+  // MISS BUTTON (X)
+  const missBtn = document.createElement("button");
+  missBtn.className = "score-btn special big-btn";
+  missBtn.textContent = "X";
+  missBtn.addEventListener("click", () =>
+    scoringAddScore(0, { isMiss: true })
+  );
+  scoringMissContainer.appendChild(missBtn);
+
   // FAULT BUTTON
   const faultBtn = document.createElement("button");
   faultBtn.className = "score-btn special big-btn fullwidth";
   faultBtn.textContent = "FAULT";
-  faultBtn.addEventListener("click", () => scoringAddScore(0, { isFault: true }));
+  faultBtn.addEventListener("click", () =>
+    scoringAddScore(0, { isFault: true })
+  );
   scoringButtonsContainer.appendChild(faultBtn);
 
   // UNDO BUTTON
@@ -70,30 +91,57 @@ function initScoringButtons() {
   scoringButtonsContainer.appendChild(undoBtn);
 }
 
-window.addEventListener("DOMContentLoaded", initScoringButtons);
+// ===========================================================
+// SELECT THROWER BY TAPPING PLAYER NAME
+// ===========================================================
+
+function setThrower(which) {
+  if (!scoringMatch) return;
+  scoringCurrentThrower = which;
+  scCurrentThrowerLabel.textContent =
+    (which === "p1" ? scoringMatch.p1Name : scoringMatch.p2Name) + " to throw";
+}
 
 // ===========================================================
-// OPEN / CLOSE
+// OPEN / CLOSE CONSOLE
 // ===========================================================
 
 async function openScoringConsole() {
   if (!scoringMatch) return;
 
-  // Check lock
-  const { data: lock } = await dbCheckScoringLock(scoringMatch.matchId);
+  const matchId = scoringMatch.matchId;
 
-  const now = Date.now();
-  const expired = lock && lock.expires_at && new Date(lock.expires_at).getTime() < now;
+  // Load current lock
+  const { data: lock } = await dbCheckScoringLock(matchId);
 
-  if (lock && !expired) {
-    alert(`Scoring is currently locked by ${lock.locked_by}.`);
+  const nowMs = Date.now();
+  const expired =
+    lock &&
+    lock.expires_at &&
+    new Date(lock.expires_at).getTime() < nowMs;
+
+  // CASE 1 — No lock exists
+  if (!lock) {
+    await dbAcquireScoringLock(matchId);
+    scoringConsole.style.display = "block";
     return;
   }
 
-  // Acquire lock
-  await dbAcquireScoringLock(scoringMatch.matchId, "Scorer");
+  // CASE 2 — Lock expired → take it
+  if (expired) {
+    await dbAcquireScoringLock(matchId);
+    scoringConsole.style.display = "block";
+    return;
+  }
 
-  scoringConsole.style.display = "block";
+  // CASE 3 — Lock held by YOU → allow entry
+  if (lock.locked_by === "local-user") {
+    scoringConsole.style.display = "block";
+    return;
+  }
+
+  // CASE 4 — Lock held by someone else → block
+  alert(`Scoring is locked by ${lock.locked_by}.`);
 }
 
 // ===========================================================
@@ -104,6 +152,15 @@ async function openScoringConsole() {
 function resetScoringStateForMatch(match, sets) {
   sets = sets || [];
 
+// === Build set_number → set_row map so throws can use correct set_id ===
+scoringSetsByNumber = {};
+sets.forEach(s => {
+  if (s.set_number != null) {
+    scoringSetsByNumber[s.set_number] = s;  // s must include s.id
+  }
+});
+
+
   scoringMatch = {
     matchId: match.id,
     tournamentId: match.tournament?.id,
@@ -113,75 +170,113 @@ function resetScoringStateForMatch(match, sets) {
     p2Name: match.player2?.name || "Player 2",
     setsP1: match.final_sets_player1 ?? 0,
     setsP2: match.final_sets_player2 ?? 0,
+    status: match.status || "scheduled",
   };
 
   // expose for realtime updater
   window.scoringMatch = scoringMatch;
 
-
-  // === FIND CURRENT LIVE SET (or next set number) ======================
+  // === Determine current set ======================================
   let currentSet = null;
-
   if (sets.length > 0) {
     const unfinished = sets.filter(
-      (s) => !s.winner_player_id && (s.score_player1 ?? 0) < 50 && (s.score_player2 ?? 0) < 50
+      (s) =>
+        !s.winner_player_id &&
+        (s.score_player1 ?? 0) < 50 &&
+        (s.score_player2 ?? 0) < 50
     );
-
     if (unfinished.length > 0) {
-      // Highest-numbered unfinished set
       currentSet = unfinished.reduce((a, b) =>
         a.set_number > b.set_number ? a : b
       );
-    } else {
-      // All sets are finished: next one would be last set_number + 1
-      const maxNum = Math.max(...sets.map((s) => s.set_number || 0));
-      scoringMatch.currentSetNumber = maxNum + 1;
     }
   }
 
-  if (!scoringMatch.currentSetNumber) {
-    // If not already determined above
-    if (currentSet) {
-      scoringMatch.currentSetNumber = currentSet.set_number;
-    } else if (sets.length > 0) {
-      const maxNum = Math.max(...sets.map((s) => s.set_number || 0));
-      scoringMatch.currentSetNumber = maxNum + 1;
-    } else {
-      scoringMatch.currentSetNumber = 1;
-    }
-  }
-
-  // === INITIALISE SET SCORE ============================================
-  if (currentSet && currentSet.set_number === scoringMatch.currentSetNumber) {
+  if (currentSet) {
+    scoringMatch.currentSetNumber = currentSet.set_number;
     scoringCurrentSetSP1 = currentSet.score_player1 || 0;
     scoringCurrentSetSP2 = currentSet.score_player2 || 0;
     scoringCurrentThrower = currentSet.current_thrower || "p1";
   } else {
+    const maxNum =
+      sets.length > 0
+        ? Math.max(...sets.map((s) => s.set_number || 0))
+        : 0;
+    scoringMatch.currentSetNumber = maxNum + 1;
     scoringCurrentSetSP1 = 0;
     scoringCurrentSetSP2 = 0;
     scoringCurrentThrower = "p1";
   }
 
-  // === RESET THROW SEQUENCE (session-only) =============================
   scoringThrowHistory = [];
 
-  // === UPDATE UI =======================================================
+  // === Update UI ===================================================
   scP1Name.textContent = scoringMatch.p1Name;
   scP2Name.textContent = scoringMatch.p2Name;
 
   scP1Sets.textContent = scoringMatch.setsP1;
   scP2Sets.textContent = scoringMatch.setsP2;
 
-  scP1SP.textContent = scoringCurrentSetSP1;
-  scP2SP.textContent = scoringCurrentSetSP2;
+  // Match SP (overall small points) – you can wire this later
+  scP1SP.textContent = 0;
+  scP2SP.textContent = 0;
 
   scP1SetSP.textContent = scoringCurrentSetSP1;
   scP2SetSP.textContent = scoringCurrentSetSP2;
 
   scCurrentThrowerLabel.textContent =
-    (scoringCurrentThrower === "p1" ? scoringMatch.p1Name : scoringMatch.p2Name) +
-    " to throw";
+    (scoringCurrentThrower === "p1"
+      ? scoringMatch.p1Name
+      : scoringMatch.p2Name) + " to throw";
+
+  // If match not yet started, show overlay once console opens
+  if (scoringMatch.status === "scheduled" && !currentSet) {
+    showStartMatchOverlay();
+  } else {
+    hideStartMatchOverlay();
+  }
 }
+
+// ===========================================================
+// START MATCH → create set 1, change match to "live"
+// ===========================================================
+
+const startMatchBtn = document.getElementById("start-match-btn");
+if (startMatchBtn) {
+  startMatchBtn.addEventListener("click", scoringStartMatch);
+}
+
+async function scoringStartMatch() {
+  if (!scoringMatch) return;
+
+  const matchId = scoringMatch.matchId;
+
+  // 1. Mark match as LIVE
+  await supabase
+    .from("matches")
+    .update({ status: "live" })
+    .eq("id", matchId);
+
+  // 2. Create SET 1 if it does not exist
+  await supabase
+    .from("sets")
+    .insert({
+      match_id: matchId,
+      set_number: 1,
+      score_player1: 0,
+      score_player2: 0,
+      current_thrower: scoringCurrentThrower,  // defaults to "p1"
+      winner_player_id: null
+    });
+
+  // Reload match detail so scoring state resets correctly
+  if (typeof loadMatchDetail === "function") {
+    loadMatchDetail(matchId, scoringMatch.tournamentId);
+  }
+
+  hideStartMatchOverlay();
+}
+window.scoringStartMatch = scoringStartMatch;
 
 // ===========================================================
 // SCORING LOGIC – LIVE SET SCORE + THROWER TO DB + SET CREATION
@@ -215,7 +310,7 @@ async function scoringAddScore(score, opts = {}) {
     player: isP1 ? "p1" : "p2",
     score,
     isMiss,
-    isFault
+    isFault,
   });
 
   // ===== UPDATE LOCAL UI =====
@@ -254,7 +349,7 @@ async function scoringAddScore(score, opts = {}) {
       .from("matches")
       .update({
         final_sets_player1: scoringMatch.setsP1,
-        final_sets_player2: scoringMatch.setsP2
+        final_sets_player2: scoringMatch.setsP2,
       })
       .eq("id", scoringMatch.matchId);
 
@@ -282,24 +377,28 @@ async function scoringAddScore(score, opts = {}) {
   // ===== NORMAL THROWER SWITCH =====
   scoringCurrentThrower = isP1 ? "p2" : "p1";
   scCurrentThrowerLabel.textContent =
-    (scoringCurrentThrower === "p1" ? scoringMatch.p1Name : scoringMatch.p2Name) +
-    " to throw";
+    (scoringCurrentThrower === "p1"
+      ? scoringMatch.p1Name
+      : scoringMatch.p2Name) + " to throw";
 
   // ===== SAVE SET SCORE + THROWER TO DB =====
-  await dbUpdateLiveSetScore({
-    matchId: scoringMatch.matchId,
-    setNumber: scoringMatch.currentSetNumber,
-    p1: scoringCurrentSetSP1,
-    p2: scoringCurrentSetSP2,
-    thrower: scoringCurrentThrower
-  });
+  if (typeof dbUpdateLiveSetScore === "function") {
+    await dbUpdateLiveSetScore({
+      matchId: scoringMatch.matchId,
+      setNumber: scoringMatch.currentSetNumber,
+      p1: scoringCurrentSetSP1,
+      p2: scoringCurrentSetSP2,
+      thrower: scoringCurrentThrower,
+    });
+  }
 
   // ===== REFRESH MATCH DETAIL ONLY IF CONSOLE IS CLOSED =====
   if (scoringConsole.style.display === "none") {
-    loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
+    if (typeof loadMatchDetail === "function") {
+      loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
+    }
   }
 }
-
 
 // ===============================================================
 // CREATE NEXT SET FOR A MATCH
@@ -315,7 +414,7 @@ async function dbCreateNextSet(matchId, previousSetNumber) {
       set_number: nextNumber,
       score_player1: 0,
       score_player2: 0,
-      winner_player_id: null
+      winner_player_id: null,
     });
 
   if (error) console.error("Create next set error:", error);
@@ -369,8 +468,9 @@ async function scoringUndo() {
   scP2SetSP.textContent = scoringCurrentSetSP2;
 
   scCurrentThrowerLabel.textContent =
-    (scoringCurrentThrower === "p1" ? scoringMatch.p1Name : scoringMatch.p2Name) +
-    " to throw";
+    (scoringCurrentThrower === "p1"
+      ? scoringMatch.p1Name
+      : scoringMatch.p2Name) + " to throw";
 
   // Update DB set row to rebuilt scores + thrower
   if (typeof dbUpdateLiveSetScore === "function") {
@@ -383,14 +483,71 @@ async function scoringUndo() {
     });
   }
 
-  // Refresh view to reflect new scores
-  if (typeof loadMatchDetail === "function") {
-    loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
+  // Refresh view to reflect new scores if console closed
+  if (scoringConsole.style.display === "none") {
+    if (typeof loadMatchDetail === "function") {
+      loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
+    }
   }
 }
 
 // ===========================================================
-// EXPOSE GLOBALLY FOR app.js
+// SAFE CLOSE — guaranteed not to break scoring console
+// ===========================================================
+function closeScoringConsole() {
+  try {
+    // Release lock if we own it
+    if (window.scoringMatch && typeof dbReleaseScoringLock === "function") {
+      dbReleaseScoringLock(window.scoringMatch.matchId);
+    }
+
+    const el = document.getElementById("scoring-console");
+    if (el) el.style.display = "none";
+    refreshScoreButtonLock(scoringMatch?.matchId);
+
+    const content = document.getElementById("content");
+    if (content) {
+      content.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  } catch (err) {
+    console.warn("closeScoringConsole error (safe ignored):", err);
+  }
+}
+
+
+// ===========================================================
+// WIRE UP EVENTS ON DOM READY
+// ===========================================================
+
+window.addEventListener("DOMContentLoaded", () => {
+  initScoringButtons();
+
+  if (scoringCloseBtn) {
+    scoringCloseBtn.addEventListener("click", closeScoringConsole);
+  }
+
+  const startMatchBtn = document.getElementById("start-match-btn");
+  if (startMatchBtn) {
+    startMatchBtn.addEventListener("click", startMatch);
+  }
+
+  if (scP1Name) scP1Name.addEventListener("click", () => setThrower("p1"));
+  if (scP2Name) scP2Name.addEventListener("click", () => setThrower("p2"));
+});
+
+// ===========================================================
+// Bind Close button AFTER DOM exists
+// ===========================================================
+document.addEventListener("DOMContentLoaded", () => {
+  const closeBtn = document.getElementById("scoring-close-btn");
+  if (closeBtn) {
+    closeBtn.onclick = () => closeScoringConsole();
+  }
+});
+
+
+// ===========================================================
+// EXPOSE FOR app.js
 // ===========================================================
 
 window.openScoringConsole = openScoringConsole;

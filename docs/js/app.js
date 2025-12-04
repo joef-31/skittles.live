@@ -916,6 +916,13 @@ async function loadMatchDetail(matchId, tournamentId) {
       }
     });
   });
+
+// periodically refresh lock status for this match
+if (window.lockRefreshTimer) clearInterval(window.lockRefreshTimer);
+
+window.lockRefreshTimer = setInterval(() => {
+  refreshScoreButtonLock(matchId);
+}, 3000);
 }
 
 // --------------------------------------------
