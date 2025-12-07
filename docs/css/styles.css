@@ -56,7 +56,6 @@ h1 {
   margin: 0;
   font-size: 1.6rem;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .header-tools {
@@ -668,24 +667,28 @@ h1 {
   color: var(--text-muted);
 }
 
-.date-bar {
+#date-bar-wrapper {
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+#date-bar {
   display: flex;
   gap: 6px;
-  overflow-x: auto;
-  margin: 8px 0 12px;
+  padding: 6px;
 }
 
 .date-pill {
   padding: 6px 8px;
   border-radius: 8px;
-  background: #e8eef7;
+  background: var(--bg-card);
   cursor: pointer;
   text-align: center;
   min-width: 72px;
 }
 
 .date-pill.active {
-  background: #1e6fd9;
+  background: #172b4b;
   color: white;
 }
 
@@ -706,7 +709,7 @@ h1 {
   }
   .card {
     padding: 10px;
-  }
+  } 
   .match-card-grid {
     font-size: 0.82rem;
   }
