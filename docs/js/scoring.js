@@ -47,40 +47,56 @@ let scoringThrowHistory = []; // session-only, only for current set
 // ===========================================================
 
 function initScoringButtons() {
-  if (!scoringButtonsContainer || !scoringMissContainer) return;
+  if (!scoringButtonsContainer) return;
 
+  // We will IGNORE scoringMissContainer entirely
+  // and keep everything in one unified grid.
   scoringButtonsContainer.innerHTML = "";
-  scoringMissContainer.innerHTML = "";
 
-  // NUMBERS 1–12 in grid
-  for (let i = 1; i <= 12; i++) {
-    const btn = document.createElement("button");
-    btn.className = "score-btn num-btn";
-    btn.textContent = i;
-    btn.addEventListener("click", () => scoringAddScore(i));
-    scoringButtonsContainer.appendChild(btn);
-  }
+	// Create grids
+	const numbersGrid = document.createElement("div");
+	numbersGrid.className = "scoring-numbers-grid";
 
-  // MISS (X)
-  const missBtn = document.createElement("button");
-  missBtn.className = "score-btn special big-btn";
-  missBtn.textContent = "X";
-  missBtn.addEventListener("click", () => scoringAddScore(0, { isMiss: true }));
-  scoringMissContainer.appendChild(missBtn);
+	const actionsGrid = document.createElement("div");
+	actionsGrid.className = "scoring-actions-grid";
 
-  // FAULT
-  const faultBtn = document.createElement("button");
-  faultBtn.className = "score-btn special big-btn fullwidth";
-  faultBtn.textContent = "FAULT";
-  faultBtn.addEventListener("click", () => scoringAddScore(0, { isFault: true }));
-  scoringButtonsContainer.appendChild(faultBtn);
+	// === NUMBERS 1–12 ===
+	for (let i = 1; i <= 12; i++) {
+	  const btn = document.createElement("button");
+	  btn.className = "score-btn num-btn";
+	  btn.textContent = i;
+	  btn.addEventListener("click", () => scoringAddScore(i));
+	  numbersGrid.appendChild(btn);
+	}
 
-  // UNDO
-  const undoBtn = document.createElement("button");
-  undoBtn.className = "score-btn danger big-btn fullwidth";
-  undoBtn.textContent = "UNDO";
-  undoBtn.addEventListener("click", scoringUndo);
-  scoringButtonsContainer.appendChild(undoBtn);
+	// === UNDO ===
+	const undoBtn = document.createElement("button");
+	undoBtn.className = "score-btn special big-btn";
+	undoBtn.textContent = "UNDO";
+	undoBtn.addEventListener("click", scoringUndo);
+	actionsGrid.appendChild(undoBtn);
+
+	// === FAULT ===
+	const faultBtn = document.createElement("button");
+	faultBtn.className = "score-btn danger big-btn";
+	faultBtn.textContent = "FAULT";
+	faultBtn.addEventListener("click", () =>
+	  scoringAddScore(0, { isFault: true })
+	);
+	actionsGrid.appendChild(faultBtn);
+
+	// === MISS ===
+	const missBtn = document.createElement("button");
+	missBtn.className = "score-btn danger big-btn";
+	missBtn.textContent = "X";
+	missBtn.addEventListener("click", () =>
+	  scoringAddScore(0, { isMiss: true })
+	);
+	actionsGrid.appendChild(missBtn);
+
+	// Append both grids
+	scoringButtonsContainer.appendChild(numbersGrid);
+	scoringButtonsContainer.appendChild(actionsGrid);
 }
 
 window.addEventListener("DOMContentLoaded", initScoringButtons);

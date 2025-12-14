@@ -88,6 +88,10 @@ function updateScoreButtonVisibility(show) {
     }
 }
 
+// --- GLOBAL ELEMENT LOOKUPS (must be before functions using them) ---
+const addFriendlyBtn = document.getElementById("add-friendly-btn");
+
+
 // Show / hide Add Friendly button depending on current view
 function setAddFriendlyVisible(visible) {
     if (!addFriendlyBtn) return;
@@ -108,6 +112,47 @@ async function ensureFriendliesTournamentExists() {
         console.error("Failed to ensure Friendlies tournament:", error);
     }
 }
+
+function linkToTournament(tId, label, tab = "standings") {
+  return `<a href="#/tournament/${tId}?tab=${tab}" class="nav-link">${label}</a>`;
+}
+
+function flagPNG(country) {
+    if (!country) return "";
+
+    // Normalise input
+    const cc = country.trim().toLowerCase();
+
+    // If the value is already ISO-2 (gb, fi, se, fr, etc.)
+    if (/^[a-z]{2}$/i.test(country)) {
+        return `<img class="flag-icon" src="https://flagcdn.com/24x18/${cc}.png">`;
+    }
+
+    // If stored as full name -> map it
+    const nameToIso = {
+        "great britain": "gb",
+        "finland": "fi",
+        "france": "fr",
+        "sweden": "se",
+        "estonia": "ee",
+        "norway": "no",
+        "usa": "us",
+        "united states": "us",
+        "ireland": "ie",
+        // add more here as needed
+    };
+
+    const iso = nameToIso[cc];
+    if (!iso) return "";
+
+    // Special case: GB subdivisions → use FlagCDN "shields"
+    if (iso.startsWith("gb-")) {
+        return `<img class="flag-icon" src="https://flagcdn.com/24x18/${iso}.png">`;
+    }
+
+    return `<img class="flag-icon" src="https://flagcdn.com/24x18/${iso}.png">`;
+}
+
 
 // =======================================================
 // 4. AUTH / PERMISSIONS
@@ -396,6 +441,32 @@ async function renderTournamentStandingsTab(tournamentId, matches) {
     renderStandingsTable(matches, sets || [], el);
 }
 
+function renderTournamentDailyTab(matches) {
+  const el = document.getElementById("tab-daily");
+  if (!el) return;
+
+  const today = new Date();
+  const yyyyMmDd = today.toISOString().slice(0, 10);
+
+  const todaysMatches = (matches || []).filter(
+    m => m.match_date && m.match_date.slice(0, 10) === yyyyMmDd
+  );
+
+  if (!todaysMatches.length) {
+    el.innerHTML = `<div class="empty-message">No matches today.</div>`;
+    return;
+  }
+
+  renderMatchCards(
+    todaysMatches,
+    window.currentTournamentId,
+    {},
+    null,
+    "tab-daily"
+  );
+}
+
+
 function renderTournamentManageTab(tournament, editions, allStages) {
   const el = document.getElementById("tab-manage");
   if (!el) return;
@@ -561,7 +632,7 @@ function bindOverviewTabs() {
                 .forEach((t) => t.classList.remove("active"));
             tab.classList.add("active");
 
-            ["overview", "standings", "fixtures", "results", "manage"].forEach(
+            ["daily", "standings", "fixtures", "results", "overview", "manage"].forEach(
                 (id) => {
                     const panel = document.getElementById(`tab-${id}`);
                     if (panel) {
@@ -704,7 +775,8 @@ async function loadTournamentMatchesManage(tournamentId) {
   window.lastSeenSet = null;
 
   showBackButton(() => {
-    window.location.hash = `#/tournament/${tournamentId}/overview`;
+    window.tournamentContext.defaultTab = "daily";
+	window.location.hash = `#/tournament/${tournamentId}/overview`;
   });
   updateScoreButtonVisibility(false);
   setAddFriendlyVisible(false);
@@ -765,8 +837,8 @@ async function loadTournamentMatchesManage(tournamentId) {
       status,
       final_sets_player1,
       final_sets_player2,
-      player1:player1_id ( id, name ),
-      player2:player2_id ( id, name )
+      player1:player1_id ( id, name, country ),
+	  player2:player2_id ( id, name, country ),
     `)
     .eq("tournament_id", tournamentId)
     .eq("edition_id", window.tournamentContext.editionId)
@@ -1395,25 +1467,30 @@ async function loadTournamentOverview(tournamentId) {
   setContent(`
     <div class="card">
       <div class="tournament-header">
-        <div class="tournament-name">${tournamentName}</div>
+        <div class="tournament-name">
+		${linkToTournament(tournament.id, tournament.name)}
+		</div>
         <div class="subtitle">Tournament overview</div>
       </div>
 
       ${renderTournamentSelectors(editions, stages)}
 
       <div class="tab-row">
-        <div class="tab active" data-tab="overview">Overview</div>
-        <div class="tab" data-tab="standings">Standings</div>
-        <div class="tab" data-tab="fixtures">Fixtures</div>
-        <div class="tab" data-tab="results">Results</div>
-        ${showManage ? `<div class="tab" data-tab="manage">Manage</div>` : ""}
-      </div>
+	  <div class="tab" data-tab="daily">Today</div>
+	  <div class="tab" data-tab="standings">Standings</div>
+	  <div class="tab" data-tab="fixtures">Fixtures</div>
+	  <div class="tab" data-tab="results">Results</div>
+	  ${showManage ? `<div class="tab" data-tab="manage">Manage</div>` : ""}
+	  <div class="tab" data-tab="overview">Overview</div>
+</div>
 
-      <div id="tab-overview"></div>
+
+	  <div id="tab-daily" style="display:none;"></div>
       <div id="tab-standings" style="display:none;"></div>
       <div id="tab-fixtures" style="display:none;"></div>
       <div id="tab-results" style="display:none;"></div>
       ${showManage ? `<div id="tab-manage" style="display:none;"></div>` : ""}
+      <div id="tab-overview"></div>
     </div>
   `);
 
@@ -1430,16 +1507,33 @@ async function loadTournamentOverview(tournamentId) {
   });
 
   // 7) Render tabs
-  renderTournamentOverviewTab(tournament, matches);
+  renderTournamentDailyTab(matches);
   renderTournamentFixturesTab(matches);
   renderTournamentResultsTab(matches);
   await renderTournamentStandingsTab(tournamentId, matches);
+  renderTournamentOverviewTab(tournament, matches);
   bindOverviewTabs();
+  
+  const defaultTab =
+  window.tournamentContext.defaultTab ||
+  window.tournamentContext.activeOverviewTab ||
+  "standings";
 
+	// consume it
+	window.tournamentContext.defaultTab = null;
+
+	const tabEl = document.querySelector(`.tab[data-tab="${defaultTab}"]`);
+	if (tabEl) tabEl.click();
+	
+	if (window.location.hash.includes("tab=daily")) {
+	activateTab("daily");
+}
+
+/* 
   // Restore previously active tab
   const activeTab = window.tournamentContext.activeOverviewTab || "overview";
   const tabEl = document.querySelector(`.tab[data-tab="${activeTab}"]`);
-  if (tabEl) tabEl.click();
+  if (tabEl) tabEl.click(); */
 
   // 8) Manage tab
   if (showManage) {
@@ -1455,7 +1549,9 @@ async function loadTournamentOverview(tournamentId) {
   }
 }
 
+// =======================================================
 
+/*
 async function loadTournamentView(tournamentId) {
         window.currentMatchId = null;
         window.currentTournamentId = tournamentId;
@@ -1555,7 +1651,9 @@ async function loadTournamentView(tournamentId) {
         let html = `
     <div class="card">
       <div class="tournament-header">
-        <div class="tournament-name">${tournamentName}</div>
+        <div class="tournament-name">
+		${linkToTournament(tournament.id, tournament.name)}
+		</div>
       </div>
 
       <div class="tab-row">
@@ -1726,7 +1824,7 @@ async function loadTournamentView(tournamentId) {
                 });
             });
         }
-    }
+    } */
 
 async function loadFriendlyCreate() {
   window.currentMatchId = null;
@@ -2007,7 +2105,7 @@ function renderTournamentMatchesTable(matches = []) {
         window.lastSeenSet = null;
 
         showBackButton(() => {
-            window.location.hash = `#/tournament/${tournamentId}`;
+            window.location.hash = `#/tournament/${tournamentId}/overview?tab=daily`;
         });
 
         updateScoreButtonVisibility(true);
@@ -2109,12 +2207,16 @@ function renderTournamentMatchesTable(matches = []) {
         // --- Render header + skeleton for sets ---
         const html = `
     <div class="card top-card">
-      <div class="subtitle">${tournamentName}</div>
+      <div class="subtitle">${linkToTournament(tournamentId, tournamentName)}</div>
 
       <div class="top-score-row">
-        <div class="top-player" style="text-align:right;">${p1Name}</div>
+		<span style="text-align: right;" class="match-header-player" data-player-id="${match.player1?.id}">
+			${match.player1?.name || "Player 1"}
+		</span>
         <div class="top-score">${overallSets}</div>
-        <div class="top-player" style="text-align:left;">${p2Name}</div>
+		<span class="match-header-player" data-player-id="${match.player2?.id}">
+			${match.player2?.name || "Player 2"}
+		</span>
       </div>
 
       <div class="live-throwstrip-row">
@@ -2123,10 +2225,10 @@ function renderTournamentMatchesTable(matches = []) {
         <div class="live-throwstrip p2" id="header-throws-p2"></div>
       </div>
 
-      <div class="match-small">
+      <div class="match-small" style="text-align:center;">
         ${formatDate(match.match_date)}
       </div>
-      <div class="match-small">
+      <div class="match-small" style="text-align:center;">
         <span class="pill ${pillClass}">${pillLabel}</span>
       </div>
     </div>
@@ -2406,13 +2508,14 @@ async function loadTournaments() {
         setContent(html);
 
         // Click handlers for tournament cards
-        document.querySelectorAll("[data-tid]").forEach((el) => {
-            el.addEventListener("click", () => {
-                const tid = el.getAttribute("data-tid");
-                if (!tid) return;
-                window.location.hash = `#/tournament/${tid}`;
-            });
-        });
+		document.querySelectorAll("[data-tid]").forEach((el) => {
+		  el.addEventListener("click", () => {
+			const tid = el.getAttribute("data-tid");
+			if (!tid) return;
+			// Home view is "daily-first"
+			window.location.hash = `#/tournament/${tid}/overview?tab=daily`;
+		  });
+		});
 
         // Click handler for Friendlies card
         const friendliesCard = document.querySelector(
@@ -2470,31 +2573,40 @@ async function loadTournaments() {
         renderCountriesView(countries);
     }
 
-    // =======================================================
-    // 10. SIMPLE HASH ROUTER — keeps view in sync with URL
-    // =======================================================
+// =======================================================
+// 10. SIMPLE HASH ROUTER — keeps view in sync with URL
+// =======================================================
 
-  function handleRoute() {
-  const hash = window.location.hash || "#/tournaments";
-  const parts = hash.replace("#", "").split("/");
+function handleRoute() {
+  // Default route
+  const raw = window.location.hash || "#/tournaments";
 
-  // #/tournaments
+  // Strip leading '#'
+  const withoutHash = raw.slice(1); // e.g. "/tournament/abc/overview?tab=daily"
+
+  // Split path and query string
+  const [pathPart, queryString] = withoutHash.split("?");
+  const parts = pathPart.split("/"); // ["", "tournaments", ...]
+  const params = new URLSearchParams(queryString || "");
+
+  // #/tournaments   (home tournaments list with date bar)
   if (parts[1] === "tournaments") {
     loadTournaments();
     return;
   }
 
-  // #/leagues
+  // #/leagues       (country → tournaments menu)
   if (parts[1] === "leagues") {
     loadTournamentsMenu();
     return;
   }
 
-  // #/friendlies → just the Friendlies tournament
-  if (parts[1] === "friendlies" && !parts[2]) {
-    loadTournamentView(FRIENDLIES_TOURNAMENT_ID);
+  // #/friendlies    → use the existing tournament-style view for Friendlies
+if (parts[1] === "friendlies" && !parts[2]) {
+    window.tournamentContext.activeOverviewTab = "daily"; // optional
+    loadTournamentOverview(FRIENDLIES_TOURNAMENT_ID);
     return;
-  }
+}
 
   // #/friendlies/new
   if (parts[1] === "friendlies" && parts[2] === "new") {
@@ -2502,72 +2614,67 @@ async function loadTournaments() {
     return;
   }
 
-  // #/tournament/<tid>/overview
-  if (parts[1] === "tournament" && parts[2] && parts[3] === "overview") {
-    loadTournamentOverview(parts[2]);
-    return;
-  }
-  
-  // #/tournament/<tid>/match/<mid>/sets
-if (
-  parts[1] === "tournament" &&
-  parts[2] &&
-  parts[3] === "match" &&
-  parts[4] &&
-  parts[5] === "sets"
-) {
-  loadTournamentMatchSets(parts[4], parts[2]);
-  return;
-}
+	  // #/tournament/<tid>/manage-matches
+	  if (parts[1] === "tournament" && parts[2] && parts[3] === "manage-matches") {
+		loadTournamentMatchesManage(parts[2]);
+		return;
+	  }
 
-  // #/tournament/<tid>/manage-matches
-  if (parts[1] === "tournament" && parts[2] && parts[3] === "manage-matches") {
-    loadTournamentMatchesManage(parts[2]);
-    return;
-  }
-
-  // #/tournament/<tid>
+  // Unified tournament route:
+  // #/tournament/<tid>/overview?tab=<tabName>
+  // or even just #/tournament/<tid>?tab=<tabName>
   if (parts[1] === "tournament" && parts[2]) {
-    loadTournamentView(parts[2]);
+    const tid = parts[2];
+
+    // Read ?tab= from query string (daily, standings, fixtures, results, overview, manage)
+    const tab = params.get("tab");
+
+    if (tab) {
+      window.tournamentContext.activeOverviewTab = tab;
+    } else if (!window.tournamentContext.activeOverviewTab) {
+      // Default if no tab set explicitly: standings
+      window.tournamentContext.activeOverviewTab = "standings";
+    }
+
+    // Always use the OVERVIEW page (which contains all tabs)
+    loadTournamentOverview(tid);
+    return;
+	}
+
+  // #/tournament/<tid>/match/<mid>/sets  (set entry screen)
+  if (parts[1] === "tournament" && parts[2] && parts[3] === "match" && parts[4] && parts[5] === "sets") {
+    const tournamentId = parts[2];
+    const matchId = parts[4];
+    loadTournamentMatchSets(matchId, tournamentId);
     return;
   }
-  
-  // #/tournament/<tid>/match/<mid>/sets
-if (
-  parts[1] === "tournament" &&
-  parts[2] &&
-  parts[3] === "match" &&
-  parts[4] &&
-  parts[5] === "sets"
-) {
-  loadTournamentMatchSets(parts[4], parts[2]);
-  return;
-}
-  
-  // #/match/<mid>/sets/setup
-if (parts[1] === "match" && parts[2] && parts[3] === "sets" && parts[4] === "setup") {
-  loadMatchSetSetup(parts[2]);
-  return;
-}
 
-// #/match/<mid>/throws/upload
-if (parts[1] === "match" && parts[2] && parts[3] === "throws" && parts[4] === "upload") {
-  loadMatchThrowsUpload(parts[2]);
-  return;
-}
-
-  // #/match/<mid>/<tid>
+  // #/match/<mid>/<tid>   (match detail)
   if (parts[1] === "match" && parts[2] && parts[3]) {
     loadMatchDetail(parts[2], parts[3]);
     return;
   }
-
-
-  // fallback
-  loadTournaments();
+	
+// #/player/<pid>?tab=<tabName>
+if (parts[1] === "player" && parts[2]) {
+    const pid = parts[2];
+    const tab = params.get("tab") || "overview";
+    loadPlayerPage(pid, tab);
+    return;
+}
 }
 
+  // Fallback
+  loadTournaments();
+
+
+// =======================================================
+// INITIAL LOAD
+// =======================================================
+
+handleRoute();
 window.addEventListener("hashchange", handleRoute);
+
 
 
 // =======================================================
@@ -2674,14 +2781,47 @@ window.addEventListener("hashchange", handleRoute);
   `;
     }
 
-    function bindTournamentLinks() {
-        document.querySelectorAll(".tournament-card").forEach((card) => {
-            card.addEventListener("click", () => {
-                const id = card.dataset.tid;
-                window.location.hash = `#/tournament/${id}/overview`;
-            });
-        });
-    }
+function bindTournamentLinks() {
+  document.querySelectorAll(".tournament-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const id = card.dataset.tid;
+      if (!id) return;
+      // Country view is "standings-first"
+      window.location.hash = `#/tournament/${id}/overview?tab=standings`;
+    });
+  });
+}
+
+document.addEventListener("click", (ev) => {
+    const el = ev.target.closest(".match-header-player");
+    if (!el) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    const pid = el.dataset.playerId;
+    if (!pid) return;
+
+    window.location.hash = `#/player/${pid}`;
+});
+
+document.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".tab-btn");
+    if (!btn) return;
+
+    const page = btn.closest("#player-page");
+    if (!page) return;
+
+    const tab = btn.dataset.tab;
+
+    // Extract pid safely
+    const h = window.location.hash;      // "#/player/<pid>?tab=..."
+    const pid = h.split("/")[2].split("?")[0]; // keep only the UUID
+
+    // Update URL (this triggers router → reloads correct tab)
+    window.location.hash = `#/player/${pid}?tab=${tab}`;
+});
+
 
     // =======================================================
     // LOAD TOURNAMENT OVERVIEW
@@ -2819,28 +2959,10 @@ window.addEventListener("hashchange", handleRoute);
     // HEADER BUTTONS
     // -------------------------------------------------------
 
-    let addFriendlyBtn = null;
     let leaguesBtn = null;
 
     document.addEventListener("DOMContentLoaded", () => {
         if (typeof headerTools === "undefined" || !headerTools) return;
-
-        // ---- Add Friendly button ----
-        addFriendlyBtn = document.createElement("button");
-        addFriendlyBtn.id = "addFriendlyBtn";
-        addFriendlyBtn.className = "header-btn";
-        addFriendlyBtn.style.display = "none";
-        addFriendlyBtn.title = "Create a new friendly match";
-        addFriendlyBtn.innerHTML = `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="4" y="4" width="16" height="16" rx="3" ry="3"
-        fill="none" stroke="currentColor" stroke-width="1.6" />
-      <path d="M12 8 v8 M8 12 h8"
-        fill="none" stroke="currentColor" stroke-width="1.6" />
-    </svg>
-    <span class="header-btn-label">Add friendly</span>
-  `;
-        headerTools.appendChild(addFriendlyBtn);
 
         // ---- Leagues button ----
         leaguesBtn = document.createElement("button");
@@ -3328,14 +3450,6 @@ window.addEventListener("hashchange", handleRoute);
     }
 
     // =======================================================
-    // LOAD TOURNAMENTS LIST (includes Friendlies card last)
-    // =======================================================
-
-    // =======================================================
-    // ADD FRIENDLY PAGE (#/friendlies/new)
-    // =======================================================
-
-    // =======================================================
     // CREATE TOURNAMENT MATCH
     // =======================================================
 
@@ -3758,8 +3872,271 @@ function setupHomeDateBar(allDates, dateToTournamentIds) {
 }
 
 // =======================================================
-// LOAD MATCH DETAIL (shared for tournaments + friendlies)
+// PLAYER PROFILE
 // =======================================================
+
+async function loadPlayerPage(playerId, tabFromRoute = "overview") {
+    window.currentMatchId = null;
+    window.currentTournamentId = null;
+    window.lastSeenSet = null;
+
+    showBackButton(() => {
+        window.location.hash = "#/tournaments";
+    });
+
+    updateScoreButtonVisibility(false);
+    setAddFriendlyVisible(false);
+
+    showLoading("Loading player…");
+
+    // 1) Load player record
+    const { data: player, error: pErr } = await supabase
+        .from("players")
+        .select("id, name, country, is_guest")
+        .eq("id", playerId)
+        .maybeSingle();
+
+    if (pErr || !player) {
+        showError("Player not found.");
+        return;
+    }
+
+    // 2) Load all matches involving this player
+    const { data: matches, error: mErr } = await supabase
+        .from("matches")
+        .select(`
+            id,
+            match_date,
+            status,
+            final_sets_player1,
+            final_sets_player2,
+            player1:player1_id ( id, name, country ),
+            player2:player2_id ( id, name, country ),
+            tournament:tournament_id ( id, name )
+        `)
+        .or(`player1_id.eq.${playerId},player2_id.eq.${playerId}`)
+        .order("match_date", { ascending: false });
+
+    const allMatches = matches || [];
+
+	// Restore saved tab (per player)
+	const savedTab = localStorage.getItem(`playerTab_${player.id}`);
+
+	// Store context
+    window.playerContext = {
+        player,
+        matches: allMatches,
+        activeTab: tabFromRoute
+    };
+
+    // 3) Render page scaffold
+    setContent(`
+        <div class="card" id="player-page">
+
+            <div class="tournament-header">
+                <div class="tournament-name">${flagPNG(player.country)} ${player.name}</div>
+                <div class="subtitle">Player profile</div>
+            </div>
+
+            <div class="tab-row" id="player-tabs">
+                <div class="tab" data-tab="overview">Overview</div>
+                <div class="tab" data-tab="fixtures">Fixtures</div>
+                <div class="tab" data-tab="results">Results</div>
+                <div class="tab" data-tab="teams">Teams</div>
+            </div>
+
+            <div id="player-overview" style="display:none;"></div>
+            <div id="player-fixtures" style="display:none;"></div>
+            <div id="player-results" style="display:none;"></div>
+            <div id="player-teams" style="display:none;"></div>
+
+        </div>
+    `);
+	
+	// Wire up tab clicks
+	document.querySelectorAll("#player-page .tab").forEach(tabEl => {
+		tabEl.addEventListener("click", (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+
+			const tab = tabEl.dataset.tab;
+
+			// Extract clean player ID
+			const h = window.location.hash;
+			const pid = h.split("/")[2].split("?")[0];
+
+			// Update URL → router reloads → correct tab loads
+			window.location.hash = `#/player/${pid}?tab=${tab}`;
+		});
+	});
+
+    window.playerContext.activeTab = tabFromRoute;
+	renderPlayerTabs(playerId, tabFromRoute);
+}
+
+function renderPlayerTabs() {
+    const ctx = window.playerContext;
+    if (!ctx) return;
+
+    // Update tab buttons
+    document.querySelectorAll("#player-tabs .tab").forEach(t => {
+        t.classList.toggle("active", t.dataset.tab === ctx.activeTab);
+    });
+
+    // Hide all panels
+    document.querySelectorAll("#player-overview, #player-fixtures, #player-results, #player-teams")
+        .forEach(el => el.style.display = "none");
+
+    // Show selected
+    const panel = document.getElementById(`player-${ctx.activeTab}`);
+    if (panel) panel.style.display = "block";
+
+    // Render tab content
+    if (ctx.activeTab === "overview") renderPlayerOverviewPanel(ctx);
+    if (ctx.activeTab === "fixtures") renderPlayerFixturesPanel(ctx);
+    if (ctx.activeTab === "results") renderPlayerResultsPanel(ctx);
+    if (ctx.activeTab === "teams") renderPlayerTeamsPanel(ctx);
+}
+
+// TAB CONTENT =========================================================
+
+function renderPlayerOverviewPanel(ctx) {
+    const p = ctx.player;
+
+    document.getElementById("player-overview").innerHTML = `
+        <div class="overview-grid">
+            <div class="overview-item">
+                <div class="label">Name</div>
+                <div class="value">${p.name}</div>
+            </div>
+            <div class="overview-item">
+                <div class="label">Country</div>
+                <div class="value">${p.country || "—"}</div>
+            </div>
+            <div class="overview-item">
+                <div class="label">Guest</div>
+                <div class="value">${p.is_guest ? "Yes" : "No"}</div>
+            </div>
+            <div class="overview-item">
+                <div class="label">Matches played</div>
+                <div class="value">${ctx.matches.length}</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderPlayerResultsPanel(ctx) {
+    const finished = ctx.matches.filter(m => m.status === "finished");
+    const el = document.getElementById("player-results");
+
+    if (!finished.length) {
+        el.innerHTML = `<div class="empty-message">No results yet.</div>`;
+        return;
+    }
+
+    const playerId = ctx.player.id;
+
+    el.innerHTML = finished.map(m => {
+        const isP1 = m.player1.id === playerId;
+        const opponent = isP1 ? m.player2 : m.player1;
+
+        const oppFlag = flagPNG(opponent.country);
+
+        const scoreFor = isP1 ? m.final_sets_player1 : m.final_sets_player2;
+        const scoreAgainst = isP1 ? m.final_sets_player2 : m.final_sets_player1;
+
+        const dateLabel = formatDate(m.match_date);
+        const tournamentName = m.tournament?.name || "";
+
+        // Pill
+        let pillClass = "pill-blue";
+        let pillText = "D";
+        if (scoreFor > scoreAgainst) { pillClass = "pill-green"; pillText = "W"; }
+        else if (scoreFor < scoreAgainst) { pillClass = "pill-red"; pillText = "L"; }
+
+        return `
+        <div class="card clickable player-match-card" data-mid="${m.id}" data-tid="${m.tournament.id}">
+            
+            <div class="pm-row-1">
+                <div class="pm-opponent">
+					${oppFlag} ${opponent.name}
+				</div>
+
+                <div class="pm-middle">
+                    <div class="pm-score">${scoreFor}–${scoreAgainst}</div>
+                    <div class="pm-pill ${pillClass}">${pillText}</div>
+                </div>
+            </div>
+
+            <div class="pm-subrow">${dateLabel} • ${tournamentName}</div>
+        </div>
+        `;
+    }).join("");
+
+    el.querySelectorAll("[data-mid]").forEach(card => {
+        card.addEventListener("click", () => {
+            window.location.hash = `#/match/${card.dataset.mid}/${card.dataset.tid}`;
+        });
+    });
+}
+
+
+function renderPlayerFixturesPanel(ctx) {
+    const upcoming = ctx.matches.filter(m => m.status === "scheduled");
+    const el = document.getElementById("player-fixtures");
+
+    if (!upcoming.length) {
+        el.innerHTML = `<div class="empty-message">No upcoming fixtures.</div>`;
+        return;
+    }
+
+    const playerId = ctx.player.id;
+
+    el.innerHTML = upcoming.map(m => {
+        const isP1 = m.player1.id === playerId;
+        const opponent = isP1 ? m.player2 : m.player1;
+
+        const oppFlag = opponent.country ? flagPNG(opponent.country) : "";
+
+        const dateLabel = formatDate(m.match_date);
+        const tournamentName = m.tournament?.name || "";
+
+        return `
+        <div class="card clickable player-match-card" data-mid="${m.id}" data-tid="${m.tournament.id}">
+
+            <div class="pm-row-1">
+                <div class="pm-opponent">
+					${oppFlag} ${opponent.name}
+				</div>
+
+                <div class="pm-score upcoming">–</div>
+                <div class="pm-pill pm-pill-scheduled">–</div>
+            </div>
+
+            <div class="pm-subrow">
+                ${dateLabel} • ${tournamentName}
+            </div>
+        </div>
+        `;
+    }).join("");
+
+    // Make cards clickable
+    el.querySelectorAll("[data-mid]").forEach(card => {
+        card.addEventListener("click", () => {
+            const mid = card.dataset.mid;
+            const tid = card.dataset.tid;
+            window.location.hash = `#/match/${mid}/${tid}`;
+        });
+    });
+}
+
+
+
+function renderPlayerTeamsPanel(ctx) {
+    // Teams system not implemented yet — placeholder
+    document.getElementById("player-teams").innerHTML =
+        `<div class="empty-message">Teams will be added later.</div>`;
+}
 
 // =======================================================
 // INITIAL LOAD

@@ -3,9 +3,9 @@
 // DOM ELEMENTS
 // ---------------------------
 
-const contentEl = document.getElementById("content");
+/* const contentEl = document.getElementById("content");
 const backBtn = document.getElementById("backBtn");
-const scoreBtn = document.getElementById("scoreBtn");
+const scoreBtn = document.getElementById("scoreBtn"); */
 const headerTools = document.querySelector(".header-tools");
 
 // back handler callback
@@ -45,7 +45,7 @@ function showLoading(msg) {
 // ---------------------------
 
 function updateScoreButtonVisibility(onMatchDetail) {
-  if (SUPERADMIN && onMatchDetail) {
+  if (window.SUPERADMIN && onMatchDetail) {
     scoreBtn.style.display = "inline-flex";
   } else {
     scoreBtn.style.display = "none";
