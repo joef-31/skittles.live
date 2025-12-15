@@ -393,6 +393,14 @@ function renderBottomBar() {
 	  !!window.currentTournament &&
 	  canManageTournament(window.currentTournament);
 	  
+	const isFriendlies =
+	window.currentTournamentId === FRIENDLIES_TOURNAMENT_ID;
+
+	const canAddFriendly =
+	  isFriendlies &&
+	  !window.currentMatchId;
+
+	  
 	if (
 	  window.currentTournament &&
 	  canManageTournament(window.currentTournament)
@@ -407,7 +415,7 @@ function renderBottomBar() {
 		}
 	  });
 	}
-
+	
   const bar = document.createElement("div");
   bar.id = "bottom-bar";
 
@@ -434,6 +442,17 @@ function renderBottomBar() {
       `
           : ""
       }
+	  
+	${
+	canAddFriendly
+		? `
+	  <button class="bb-item" data-action="add-friendly">
+		<img src="assets/icon-add.svg" alt="" />
+		<span>Add friendly</span>
+	  </button>
+	`
+		: ""
+	}
 
       ${
         canManage
@@ -456,21 +475,26 @@ function renderBottomBar() {
     btn.addEventListener("click", () => {
       const action = btn.dataset.action;
 
-      if (action === "today") {
-        window.location.hash = "#/tournaments";
-      }
+		if (action === "today") {
+		  window.location.hash = "#/tournaments";
+		}
 
-      if (action === "tournaments") {
-        window.location.hash = "#/leagues";
-      }
+		if (action === "tournaments") {
+		  window.location.hash = "#/leagues";
+		}
 
-      if (action === "score" && canScore) {
-        openScoringConsole();
-      }
+		if (action === "add-friendly" && canAddFriendly) {
+		  window.location.hash = "#/friendlies/new";
+		}
 
-      if (action === "manage" && canManage) {
-        window.location.hash = `#/tournament/${window.currentTournamentId}/overview?tab=manage`;
-      }
+		if (action === "score" && canScore) {
+		  openScoringConsole();
+		}
+
+		if (action === "manage" && canManage) {
+		  window.location.hash =
+			`#/tournament/${window.currentTournamentId}/overview?tab=manage`;
+		}
     });
   });
 }
@@ -1003,6 +1027,9 @@ async function loadTournamentOverview(tournamentId) {
     .select("id, name")
     .eq("edition_id", window.tournamentContext.editionId)
     .order("order_index", { ascending: true });
+	
+	window.currentEditions = editions || [];
+	window.currentStages = stages || [];
 
   if (stagesError) {
     console.error(stagesError);
@@ -1049,7 +1076,8 @@ async function loadTournamentOverview(tournamentId) {
       player2:player2_id ( id, name ),
       tournament:tournament_id ( id, name, country, type ),
       edition_id,
-      stage_id
+      stage_id,
+	  group_id
     `)
     .eq("tournament_id", tournamentId)
     .eq("edition_id", window.tournamentContext.editionId)
@@ -1149,7 +1177,57 @@ async function loadTournamentOverview(tournamentId) {
 updateBottomBar();
 }
 
-function renderStandingsTable(matches, sets, container) {
+async function loadTournamentStructure(tournamentId) {
+  window.currentTournamentId = tournamentId;
+
+  showBackButton(() => {
+    window.location.hash = `#/tournament/${tournamentId}/overview?tab=manage`;
+  });
+
+  updateScoreButtonVisibility(false);
+  setAddFriendlyVisible(false);
+
+  showLoading("Loading structure…");
+
+  const { data: editions, error: edErr } = await supabase
+    .from("editions")
+    .select("id,name")
+    .eq("tournament_id", tournamentId)
+    .order("created_at");
+
+  if (edErr) {
+    console.error(edErr);
+    showError("Failed to load editions.");
+    return;
+  }
+
+  setContent(`
+    <div class="card">
+      <div class="tournament-header">
+        <div class="tournament-name">Tournament structure</div>
+        <div class="subtitle">Edit editions, stages and groups</div>
+      </div>
+
+      <div id="structure-content"></div>
+    </div>
+  `);
+
+  renderTournamentStructure(editions || []);
+}
+
+
+function renderStandingsTable(matches, sets, groups, container) {
+	console.log("STANDINGS MATCH SAMPLE", matches[0]);
+	const matchesByGroup = new Map();
+
+	(matches || []).forEach(m => {
+		if (!m.group_id) return;
+		if (!matchesByGroup.has(m.group_id)) {
+			matchesByGroup.set(m.group_id, []);
+		}
+		matchesByGroup.get(m.group_id).push(m);
+	});
+
 	if (!container) return;
 
 	const matchesById = {};
@@ -1210,56 +1288,129 @@ function renderStandingsTable(matches, sets, container) {
 		playerStats[loser].smallPoints += loserScore ?? 0;
 	});
 
-	const standings = Object.values(playerStats).sort((a, b) => {
-		if (b.setsWon !== a.setsWon) return b.setsWon - a.setsWon;
-		if (b.smallPoints !== a.smallPoints)
-			return b.smallPoints - a.smallPoints;
-		return a.name.localeCompare(b.name);
-	});
-
-	if (!standings.length) {
-		container.innerHTML = `<div class="empty-message">No results yet.</div>`;
+	if (!groups || groups.length === 0) {
+		container.innerHTML = `
+			<div class="card">
+				<div class="error">
+					No groups exist for this stage yet.
+				</div>
+				<div class="subtitle" style="margin-top:6px;">
+					Create groups first, or upload fixtures that assign matches to groups.
+				</div>
+			</div>
+		`;
 		return;
 	}
 
-container.innerHTML = `
-	<table class="standings-table">
-	  <thead>
-		<tr>
-		  <th class="pos" width="2.0em" style="text-align:center;">Pos</th>
-		  <th style="text-align:left;">Player</th>
-		  <th style="text-align:center;">P</th>
-		  <th style="text-align:center;">SW</th>
-		  <th style="text-align:center;">SL</th>
-		  <th style="text-align:center;">SP</th>
-		</tr>
-	  </thead>
-	  <tbody>
-		${standings
-			.map(
-				(p, index) => `
-		  <tr data-pos="${index + 1}">
-			<td class="pos" width="2.0em" style="text-align:center;">${
-				index + 1
-			}</td>
+	container.innerHTML = "";
 
-			<td style="text-align:left;">
-				<span class="player-link" data-player-id="${p.id}">
-					${p.name}
-				</span>
-			</td>
+	groups.forEach(group => {
+		const groupMatches = matchesByGroup.get(group.id) || [];
 
-			<td style="text-align:center;">${p.played}</td>
-			<td style="text-align:center;">${p.setsWon}</td>
-			<td style="text-align:center;">${p.setsLost}</td>
-			<td style="text-align:center;">${p.smallPoints}</td>
-		  </tr>
+		// Reset per-group stats
+		const playerStats = {};
+
+		function ensurePlayer(id, name) {
+			if (!playerStats[id]) {
+				playerStats[id] = {
+					id,
+					name,
+					played: 0,
+					setsWon: 0,
+					setsLost: 0,
+					smallPoints: 0,
+				};
+			}
+		}
+
+		// Played matches
+		groupMatches.forEach((m) => {
+			if (!m.player1?.id || !m.player2?.id) return;
+			if (m.status === "scheduled") return;
+
+			ensurePlayer(m.player1.id, m.player1.name);
+			ensurePlayer(m.player2.id, m.player2.name);
+
+			playerStats[m.player1.id].played += 1;
+			playerStats[m.player2.id].played += 1;
+		});
+
+		// Sets → results
+		sets.forEach((s) => {
+			if (!s.match_id || !s.winner_player_id) return;
+
+			const m = groupMatches.find(x => x.id === s.match_id);
+			if (!m) return;
+
+			const p1Id = m.player1.id;
+			const p2Id = m.player2.id;
+
+			ensurePlayer(p1Id, m.player1.name);
+			ensurePlayer(p2Id, m.player2.name);
+
+			const winner = s.winner_player_id;
+			const loser = winner === p1Id ? p2Id : p1Id;
+
+			const winnerScore =
+				winner === p1Id ? s.score_player1 : s.score_player2;
+			const loserScore =
+				winner === p1Id ? s.score_player2 : s.score_player1;
+
+			playerStats[winner].setsWon += 1;
+			playerStats[loser].setsLost += 1;
+
+			playerStats[winner].smallPoints += winnerScore ?? 0;
+			playerStats[loser].smallPoints += loserScore ?? 0;
+		});
+
+		const standings = Object.values(playerStats).sort((a, b) => {
+			if (b.setsWon !== a.setsWon) return b.setsWon - a.setsWon;
+			if (b.smallPoints !== a.smallPoints)
+				return b.smallPoints - a.smallPoints;
+			return a.name.localeCompare(b.name);
+		});
+
+		container.insertAdjacentHTML(
+			"beforeend",
+			`
+			<div class="standings-group-title">${group.name}</div>
+			<table class="standings-table">
+			  <thead>
+				<tr>
+				  <th class="pos">Pos</th>
+				  <th style="text-align:left;">Player</th>
+				  <th>P</th>
+				  <th>SW</th>
+				  <th>SL</th>
+				  <th>SP</th>
+				</tr>
+			  </thead>
+			  <tbody>
+				${
+					standings.length
+						? standings.map(
+							(p, index) => `
+						  <tr>
+							<td class="pos">${index + 1}</td>
+							<td style="text-align:left;">
+							  <span class="player-link" data-player-id="${p.id}">
+								${p.name}
+							  </span>
+							</td>
+							<td>${p.played}</td>
+							<td>${p.setsWon}</td>
+							<td>${p.setsLost}</td>
+							<td>${p.smallPoints}</td>
+						  </tr>
+						`
+						).join("")
+						: `<tr><td colspan="6" class="empty-message">No matches yet</td></tr>`
+				}
+			  </tbody>
+			</table>
 		`
-			)
-			.join("")}
-	  </tbody>
-	</table>
-  `;
+		);
+	});
 }
 
 function renderMatchCards(
@@ -1488,8 +1639,26 @@ async function renderTournamentStandingsTab(tournamentId, matches) {
             `<div class="error">Failed to load standings.</div>`;
         return;
     }
+	
+	const stageId = window.tournamentContext?.stageId;
 
-    renderStandingsTable(matches, sets || [], el);
+	let groups = [];
+
+	if (stageId) {
+	  const { data: groupData, error: groupError } = await supabase
+		.from("groups")
+		.select("id, name")
+		.eq("stage_id", stageId)
+		.order("name");
+
+	  if (groupError) {
+		console.error(groupError);
+	  } else {
+		groups = groupData || [];
+	  }
+	}
+
+    renderStandingsTable(matches, sets || [], groups || [], el);
 }
 
 // -----------------------
@@ -1540,6 +1709,19 @@ function renderTournamentManageTab(tournament, editions, allStages) {
 
   el.innerHTML = `
     <div class="manage-grid">
+	
+		<div class="card manage-card clickable" id="manage-structure-card">
+		  <div class="manage-title">Structure</div>
+		  <div class="manage-desc">
+			Editions, stages, groups and advancement rules.
+		  </div>
+		  <div class="manage-actions">
+			<button class="header-btn small">
+			  Open structure manager
+			</button>
+		  </div>
+		</div>
+
 
       <div class="card manage-card">
         <div class="manage-title">Editions & stages</div>
@@ -1613,6 +1795,15 @@ function renderTournamentManageTab(tournament, editions, allStages) {
 		  `#/tournament/${tournament.id}/manage-matches`;
 	  });
 	}
+	
+	// Open structure manager
+	const structureCard = el.querySelector("#manage-structure-card");
+	if (structureCard) {
+	  structureCard.addEventListener("click", () => {
+		window.location.hash =
+		  `#/tournament/${tournament.id}/structure`;
+	  });
+	}
 }
 
 function renderEditionsStagesList(editions, stages) {
@@ -1667,6 +1858,357 @@ function renderEditionsStagesList(editions, stages) {
     </div>
   `;
 }
+
+async function renderTournamentStructure(tournamentId) {
+  const el = document.getElementById("structure-content");
+  if (!el) return;
+
+  // Load editions + stages
+	const editions = window.currentEditions || [];
+
+	const { data: stages } = await supabase
+	  .from("stages")
+	  .select("id,name,stage_type,edition_id,order_index")
+	  .order("order_index");
+	  
+	const { data: groups, error: groupsError } = await supabase
+	  .from("groups")
+	  .select("id, name, stage_id")
+	  .in(
+		"stage_id",
+		(stages || []).map(s => s.id)
+	  );
+
+if (groupsError) {
+  console.error(groupsError);
+}
+
+  if (!editions || !editions.length) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="empty-message">No editions yet.</div>
+        <button class="header-btn small" id="structure-add-edition">
+          + Add edition
+        </button>
+      </div>
+    `;
+    wireStructureAddEdition(tournamentId);
+    return;
+  }
+
+  const currentEditionId =
+    window.tournamentContext.editionId || editions[0].id;
+
+  const editionStages = (stages || []).filter(
+    s => s.edition_id === currentEditionId
+  );
+
+  el.innerHTML = `
+    <div class="card">
+      <label class="section-title">Edition</label>
+      <select id="structure-edition">
+        ${editions
+          .map(
+            e => `
+          <option value="${e.id}" ${
+              e.id === currentEditionId ? "selected" : ""
+            }>
+            ${e.name}
+          </option>`
+          )
+          .join("")}
+      </select>
+    </div>
+
+    <div id="structure-stages">
+      ${
+        editionStages.length
+          ? editionStages
+		  .map(stage => renderStageCard(stage, groups || []))
+		  .join("")
+          : `<div class="empty-message">No stages yet.</div>`
+      }
+    </div>
+
+    <div class="card">
+      <button class="header-btn small" id="structure-add-stage">
+        + Add stage
+      </button>
+    </div>
+  `;
+
+wireStructureEditionChange(tournamentId);
+wireStructureAddEdition(tournamentId);
+wireStructureAddStage(currentEditionId);
+wireStructureGroupButtons();
+wireStructureStageAccordions();
+wireStructureGroupAddButtons();
+}
+
+
+async function loadStagesForEdition(editionId) {
+  const container = document.getElementById("structure-stages");
+  if (!container) return;
+
+  container.innerHTML = `<div class="subtitle">Loading stages…</div>`;
+
+  const { data: stages, error } = await supabase
+    .from("stages")
+    .select("id,name,stage_type,order_index")
+    .eq("edition_id", editionId)
+    .order("order_index");
+
+  if (error) {
+    console.error(error);
+    container.innerHTML =
+      `<div class="error">Failed to load stages.</div>`;
+    return;
+  }
+
+  renderStages(stages || []);
+}
+
+function renderStages(stages) {
+  const container = document.getElementById("structure-stages");
+  if (!container) return;
+
+  if (!stages.length) {
+    container.innerHTML = `
+      <div class="empty-message">
+        No stages yet.
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = stages
+    .map(
+      s => `
+      <div class="card" data-stage-id="${s.id}">
+        <div class="title-row">
+          <div class="title">${s.name}</div>
+          <div class="pill scheduled">${s.stage_type}</div>
+        </div>
+
+        <div class="subtitle">Groups / rounds</div>
+        <div class="structure-groups" id="groups-${s.id}">
+          Loading…
+        </div>
+      </div>
+    `
+    )
+    .join("");
+
+  stages.forEach(stage => {
+    loadGroupsForStage(stage.id);
+  });
+}
+
+function renderStageCard(stage, groups) {
+  const stageGroups = groups.filter(g => g.stage_id === stage.id);
+
+  return `
+    <div class="card stage-card" data-stage-id="${stage.id}">
+      <div class="stage-header">
+        <div class="stage-title">
+          ${stage.name}
+          <span class="pill">${stage.stage_type}</span>
+        </div>
+      </div>
+
+      <div class="stage-groups">
+        ${
+          stageGroups.length
+            ? `
+              <ul class="simple-list">
+                ${stageGroups.map(g => `
+                  <li class="group-row" data-group-id="${g.id}">
+                    <span>${g.name}</span>
+                    <button
+                      class="icon-btn delete-group"
+                      data-group-id="${g.id}"
+                      title="Delete"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                `).join("")}
+              </ul>
+            `
+            : `<div class="empty-message">No groups yet</div>`
+        }
+      </div>
+
+      <button
+        class="header-btn small add-group-btn"
+        data-stage-id="${stage.id}"
+      >
+        + Add group / round
+      </button>
+    </div>
+  `;
+}
+
+function wireStructureEditionChange(tournamentId) {
+  const sel = document.getElementById("structure-edition");
+  if (!sel) return;
+
+  sel.addEventListener("change", () => {
+    window.tournamentContext.editionId = sel.value;
+    renderTournamentStructure(tournamentId);
+  });
+}
+
+function wireStructureAddEdition(tournamentId) {
+  const btn = document.getElementById("structure-add-edition");
+  if (!btn) return;
+
+  btn.addEventListener("click", () => {
+    createEditionPrompt(tournamentId);
+  });
+}
+
+function wireStructureAddStage(editionId) {
+  const btn = document.getElementById("structure-add-stage");
+  if (!btn) return;
+
+  btn.addEventListener("click", () => {
+    createStagePrompt(editionId);
+  });
+}
+
+function wireStructureGroupButtons() {
+  document.querySelectorAll("[data-stage]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      alert("Group editor coming next");
+    });
+  });
+}
+
+function wireStructureStageAccordions() {
+  document.querySelectorAll(".stage-toggle").forEach(toggle => {
+    toggle.addEventListener("click", async () => {
+      const card = toggle.closest(".stage-card");
+      const body = card.querySelector(".stage-body");
+      const chevron = card.querySelector(".stage-chevron");
+
+      const open = body.classList.toggle("hidden") === false;
+      chevron.textContent = open ? "▾" : "▸";
+
+      if (open) {
+        const stageId = card.dataset.stageId;
+        await loadGroupsForStage(stageId);
+      }
+    });
+  });
+}
+
+async function loadGroupsForStage(stageId) {
+  const container = document.querySelector(
+    `[data-groups-for="${stageId}"]`
+  );
+  if (!container) return;
+
+  const { data: groups, error } = await supabase
+    .from("groups")
+    .select("id,name")
+    .eq("stage_id", stageId)
+    .order("name");
+
+  if (error) {
+    container.innerHTML =
+      `<div class="error">Failed to load groups.</div>`;
+    return;
+  }
+
+  if (!groups || !groups.length) {
+    container.innerHTML =
+      `<div class="empty-message">No groups yet.</div>`;
+    return;
+  }
+
+  container.innerHTML = groups
+    .map(
+      g => `
+        <div class="group-row" data-group-id="${g.id}">
+          <input
+            type="text"
+            class="group-name-input"
+            value="${g.name}"
+          />
+          <button class="icon-btn delete-group-btn" data-group="${g.id}">
+            ✕
+          </button>
+        </div>
+      `
+    )
+    .join("");
+
+  wireGroupRename();
+  wireGroupDelete();
+}
+
+function wireStructureGroupAddButtons() {
+  document.querySelectorAll(".add-group-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const stageId = btn.dataset.stageId;
+
+      const name = prompt("Group name (e.g. Group A)");
+      if (!name) return;
+
+      const { error } = await supabase
+        .from("groups")
+        .insert({
+          stage_id: stageId,
+          name
+        });
+
+      if (error) {
+        alert("Failed to add group");
+        return;
+      }
+
+      loadTournamentOverview(window.currentTournamentId);
+    });
+  });
+}
+
+function wireGroupRename() {
+  document.querySelectorAll(".group-name-input").forEach(input => {
+    input.addEventListener("blur", async () => {
+      const row = input.closest(".group-row");
+      const groupId = row.dataset.groupId;
+      const name = input.value.trim();
+
+      if (!name) return;
+
+      await supabase
+        .from("groups")
+        .update({ name })
+        .eq("id", groupId);
+    });
+  });
+}
+
+function wireGroupDelete() {
+  document.querySelectorAll(".delete-group-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const groupId = btn.dataset.group;
+
+      if (!confirm("Delete this group?")) return;
+
+      const { error } = await supabase
+        .from("groups")
+        .delete()
+        .eq("id", groupId);
+
+      if (!error) {
+        btn.closest(".group-row").remove();
+      }
+    });
+  });
+}
+
 
 // =======================================================
 // 14. TOURNAMENT MANAGE TAB (EVENT WIRING / MUTATIONS)
@@ -1917,9 +2459,36 @@ async function loadTournamentMatchesManage(tournamentId) {
   updateScoreButtonVisibility(false);
   setAddFriendlyVisible(false);
 
-  showLoading("Loading match manager…");
+  // FIRST: render the shell so the container exists
+  setContent(`
+    <div class="card">
+      <div class="tournament-header">
+        <div class="tournament-name">Match manager</div>
+        <div class="subtitle">Create and manage matches</div>
+      </div>
 
-  // Load matches for current edition + stage
+      <div id="manage-matches-content"></div>
+    </div>
+  `);
+
+  // NOW the container exists
+  const contentEl = document.getElementById("manage-matches-content");
+
+  if (!window.tournamentContext?.editionId || !window.tournamentContext?.stageId) {
+    contentEl.innerHTML = `
+      <div class="card">
+        <div class="error">
+          Please select an edition and stage before managing matches.
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+	contentEl.innerHTML = `
+	  <div class="subtitle">Loading match manager…</div>
+	`;
+
   const { data: matches, error } = await supabase
     .from("matches")
     .select(`
@@ -1942,19 +2511,9 @@ async function loadTournamentMatchesManage(tournamentId) {
     return;
   }
 
-  setContent(`
-    <div class="card">
-      <div class="tournament-header">
-        <div class="tournament-name">Match manager</div>
-        <div class="subtitle">Create and manage matches</div>
-      </div>
-
-      <div id="manage-matches-content"></div>
-    </div>
-  `);
-
   renderManageMatches(matches || []);
 }
+
 
 // =======================================================
 // 16. MATCH MANAGER — MAIN RENDERER
@@ -1965,6 +2524,63 @@ function renderManageMatches(matches) {
   if (!el) return;
 
   el.innerHTML = `
+	  <div class="manage-matches-grid">
+
+    <!-- BULK FIXTURE UPLOAD -->
+	<div class="bulk-upload-wrapper">
+
+	  <!-- Toggle row -->
+	  <div class="set-main-row bulk-header" id="bulk-toggle">
+		<div class="col left">Bulk fixture upload</div>
+		<div class="col mid"></div>
+		<div class="col right bulk-chevron">▸</div>
+	  </div>
+
+	  <!-- Collapsible body -->
+	  <div class="set-throws-expanded hidden" id="bulk-body">
+
+		<div class="bulk-row">
+		  <label>
+			Edition
+			<select id="bulk-edition"></select>
+		  </label>
+
+		  <label>
+			Stage
+			<select id="bulk-stage"></select>
+		  </label>
+		</div>
+
+		<label>
+		  CSV input
+		  <textarea
+			id="bulk-csv-input"
+			class="form-input form-textarea"
+			rows="6"
+		  ></textarea>
+		</label>
+
+		<input
+		  type="file"
+		  id="bulk-csv-file"
+		  class="form-input"
+		/>
+
+		<div class="form-row-inline">
+		  <button class="header-btn" id="bulk-validate-btn">Validate</button>
+		  <button class="header-btn secondary" id="bulk-upload-btn" disabled>Upload</button>
+		  <button class="header-btn small secondary" id="bulk-sample-btn">
+			Download sample
+		  </button>
+		</div>
+
+		<div id="bulk-errors" class="error"></div>
+		<div id="bulk-warnings"></div>
+		<div id="bulk-preview"></div>
+
+	  </div>
+	</div>
+
     <div class="manage-matches-grid">
 
       <div class="card">
@@ -2044,8 +2660,27 @@ function renderManageMatches(matches) {
 
     </div>
   `;
+  
+	if (
+	!window.tournamentContext?.editionId ||
+	!window.tournamentContext?.stageId
+	) {
+	el.innerHTML = `
+	<div class="card">
+	  <div class="error">
+		Please select an edition and stage before managing matches.
+	  </div>
+	</div>
+	`;
+	return;
+	}
 
-  wireManageMatchAdd();
+	wireManageMatchAdd();
+	initBulkUpload({
+		tournamentId: window.currentTournamentId,
+		editionId: window.tournamentContext.editionId,
+		stageId: window.tournamentContext.stageId
+	});
 }
 
 document.querySelectorAll(".delete-match").forEach(btn => {
@@ -2352,6 +2987,254 @@ function wireTournamentMatchForm() {
     s1.value = s2.value = "";
   };
 }
+
+function initBulkUpload({ tournamentId, editionId, stageId }) {
+	const toggle = document.getElementById("bulk-toggle");
+	const body   = document.getElementById("bulk-body");
+	const chevron = toggle.querySelector(".bulk-chevron");
+
+	toggle.addEventListener("click", () => {
+	  const open = body.classList.toggle("hidden") === false;
+	  chevron.textContent = open ? "▾" : "▸";
+	});
+
+	const editionSel = document.getElementById("bulk-edition");
+	const stageSel   = document.getElementById("bulk-stage");
+
+	const csvInput   = document.getElementById("bulk-csv-input");
+	const csvFile    = document.getElementById("bulk-csv-file");
+
+	const validateBtn = document.getElementById("bulk-validate-btn");
+	const uploadBtn   = document.getElementById("bulk-upload-btn");
+
+	const errorsEl   = document.getElementById("bulk-errors");
+	const warningsEl = document.getElementById("bulk-warnings");
+	const previewEl  = document.getElementById("bulk-preview");
+	const sampleBtn  = document.getElementById("bulk-sample-btn");
+
+  if (!toggle || !body) return;
+
+  let lastValidationResult = null;
+  let warningsConfirmed = false;
+
+  // --------------------------------------------------
+  // Populate edition + stage dropdowns
+  // --------------------------------------------------
+  // NOTE: these assume you already have edition / stage data
+  // available globally or via existing helpers.
+  // Adjust data source names if needed.
+
+  function populateSelect(select, items, selectedId) {
+    select.innerHTML = `<option value="">Select…</option>`;
+    items.forEach(i => {
+      const opt = document.createElement("option");
+      opt.value = i.id;
+      opt.textContent = i.name;
+      if (i.id === selectedId) opt.selected = true;
+      select.appendChild(opt);
+    });
+  }
+
+  if (window.currentEditions) {
+    populateSelect(editionSel, window.currentEditions, editionId);
+  }
+
+  if (window.currentStages) {
+    populateSelect(stageSel, window.currentStages, stageId);
+  }
+  
+  editionSel.addEventListener("change", () => {
+  const edId = editionSel.value;
+  if (!edId || !window.currentStages) return;
+
+  const filtered = window.currentStages.filter(
+    s => s.edition_id === edId
+  );
+
+  populateSelect(stageSel, filtered, null);
+});
+
+  // --------------------------------------------------
+  // CSV file ↔ textarea syncing
+  // --------------------------------------------------
+  csvFile.addEventListener("change", () => {
+    const file = csvFile.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      csvInput.value = e.target.result || "";
+      resetValidation();
+    };
+    reader.readAsText(file);
+  });
+
+  csvInput.addEventListener("input", () => {
+    csvFile.value = "";
+    resetValidation();
+  });
+
+  // --------------------------------------------------
+  // Sample CSV download
+  // --------------------------------------------------
+  sampleBtn.addEventListener("click", () => {
+    const sample =
+`date,time,player1,player2,round
+2025-06-14,14:30,Player One,Player Two,Group A
+2025-06-14,15:15,Player Three,Player Four,Group A`;
+
+    const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "fixtures-sample.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // --------------------------------------------------
+  // Validate & preview
+  // --------------------------------------------------
+  validateBtn.addEventListener("click", async () => {
+    resetMessages();
+
+    const csvText = csvInput.value.trim();
+    const edId = editionSel.value;
+    const stId = stageSel.value;
+
+	if (!csvText || !edId || !stId || stId === "") {
+	  errorsEl.textContent = "Edition, stage and CSV are required.";
+	  return;
+	}
+
+    const result = await validateBulkFixtures({
+      csvText,
+      tournamentId,
+      editionId: edId,
+      stageId: stId
+    });
+
+    lastValidationResult = result;
+    warningsConfirmed = false;
+    uploadBtn.disabled = true;
+
+    if (!result.valid) {
+      renderErrors(result.errors);
+      return;
+    }
+
+    renderPreview(result.matches);
+
+    if (result.warnings.length) {
+      renderWarnings(result.warnings);
+    } else {
+      uploadBtn.disabled = false;
+    }
+  });
+
+  // --------------------------------------------------
+  // Upload (atomic)
+  // --------------------------------------------------
+  uploadBtn.addEventListener("click", async () => {
+    if (!lastValidationResult || !lastValidationResult.valid) return;
+
+    const { error } = await supabase
+      .from("matches")
+      .insert(lastValidationResult.matches);
+
+    if (error) {
+      errorsEl.textContent = "Upload failed. Nothing was added.";
+      return;
+    }
+
+    // Reset and refresh
+    resetAll();
+    body.classList.add("hidden");
+    toggle.textContent = "▸ Bulk fixture upload";
+
+    if (typeof reloadManageMatches === "function") {
+      reloadManageMatches();
+    }
+  });
+
+  // --------------------------------------------------
+  // Helpers
+  // --------------------------------------------------
+
+  function resetMessages() {
+    errorsEl.textContent = "";
+    warningsEl.innerHTML = "";
+    previewEl.innerHTML = "";
+  }
+
+  function resetValidation() {
+    resetMessages();
+    uploadBtn.disabled = true;
+    lastValidationResult = null;
+  }
+
+  function resetAll() {
+    csvInput.value = "";
+    csvFile.value = "";
+    resetValidation();
+  }
+
+  function renderErrors(errors) {
+    errorsEl.innerHTML = errors
+      .map(e => `Row ${e.row}: ${e.message}`)
+      .join("<br>");
+  }
+
+  function renderWarnings(warnings) {
+    warningsEl.innerHTML = `
+      <div class="pill scheduled">
+        ⚠ ${warnings[0].message}
+      </div>
+      <label style="display:block;margin-top:6px;">
+        <input type="checkbox" id="bulk-confirm-warn">
+        I understand and want to continue
+      </label>
+    `;
+
+    document
+      .getElementById("bulk-confirm-warn")
+      .addEventListener("change", e => {
+        warningsConfirmed = e.target.checked;
+        uploadBtn.disabled = !warningsConfirmed;
+      });
+  }
+
+  function renderPreview(matches) {
+    previewEl.innerHTML = `
+      <table class="simple-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Time</th>
+            <th>Player 1</th>
+            <th>Player 2</th>
+            <th>Group / Round</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${matches.map(m => `
+            <tr>
+              <td>${new Date(m.match_date_utc).toLocaleDateString()}</td>
+              <td>${new Date(m.match_date_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+              <td>${m.player1_name}</td>
+              <td>${m.player2_name}</td>
+              <td>${m.group_id || m.round_label}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+}
+
 
 // =======================================================
 // 18. MATCH DETAIL VIEW (HEADER + SETS LIST)
@@ -2879,8 +3762,187 @@ function renderMatchSets(sets, throwsBySet, p1Id, p2Id, p1Name, p2Name) {
 
 
 // =======================================================
-// 20. THROWS MODEL (MISS / FAULT / BUST LOGIC)
+// 20. ADD FRIENDLY
 // =======================================================
+
+async function loadFriendlyCreate() {
+  window.currentMatchId = null;
+  window.currentTournamentId = FRIENDLIES_TOURNAMENT_ID;
+  window.lastSeenSet = null;
+
+  showBackButton(() => {
+    window.location.hash = "#/friendlies";
+  });
+  updateScoreButtonVisibility(false);
+  setAddFriendlyVisible(false);
+
+  showLoading("Preparing friendly creator…");
+
+  await ensureFriendliesTournamentExists();
+
+  const { data: players, error } = await supabase
+    .from("players")
+    .select("id, name, is_guest")
+    .order("name", { ascending: true });
+
+  const allPlayers = players || [];
+  if (error) {
+    console.error(error);
+  }
+
+  // Build a default local datetime for the input (now)
+  const now = new Date();
+  const defaultLocal = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 16); // "YYYY-MM-DDTHH:mm"
+
+  const html = `
+    <div class="card">
+      <div class="tournament-header">
+        <div class="tournament-name">Create friendly match</div>
+        <div class="subtitle">Pickup game – results still count for real players</div>
+      </div>
+
+      <div class="section-title">Players</div>
+
+      <div class="match-small">
+        Tip: single name = guest (no profile). Full name = real player (with profile).
+      </div>
+
+      <div class="friendly-form">
+        <label>
+          Player A
+          <input type="text" id="friendly-p1-input" placeholder="Player 1 name" autocomplete="off" />
+        </label>
+        <div id="friendly-p1-suggestions" class="friendly-suggestions"></div>
+
+        <label>
+          Player B
+          <input type="text" id="friendly-p2-input" placeholder="Player 2 name" autocomplete="off" />
+        </label>
+        <div id="friendly-p2-suggestions" class="friendly-suggestions"></div>
+
+        <label>
+          Scheduled date &amp; time
+          <input type="datetime-local" id="friendly-date-input" value="${defaultLocal}" />
+        </label>
+
+        <button id="friendly-create-btn" class="header-btn" style="margin-top:10px;">
+          Create &amp; score this match
+        </button>
+
+        <div id="friendly-error" class="error" style="margin-top:6px; display:none;"></div>
+      </div>
+    </div>
+  `;
+
+  setContent(html);
+
+  const p1Input = document.getElementById("friendly-p1-input");
+  const p2Input = document.getElementById("friendly-p2-input");
+  const p1Sug = document.getElementById("friendly-p1-suggestions");
+  const p2Sug = document.getElementById("friendly-p2-suggestions");
+  const createBtn = document.getElementById("friendly-create-btn");
+  const errBox = document.getElementById("friendly-error");
+  const dateInput = document.getElementById("friendly-date-input");
+
+  function showErrorMessage(msg) {
+    if (!errBox) return;
+    if (!msg) {
+      errBox.style.display = "none";
+      errBox.textContent = "";
+    } else {
+      errBox.style.display = "block";
+      errBox.textContent = msg;
+    }
+  }
+
+  function buildSuggestions(inputEl, sugEl) {
+    if (!inputEl || !sugEl) return;
+    const q = inputEl.value.trim().toLowerCase();
+    sugEl.innerHTML = "";
+    if (q.length < 1) return;
+
+    const matches = allPlayers.filter(p =>
+      (p.name || "").toLowerCase().includes(q)
+    );
+
+    const topMatches = matches.slice(0, 5);
+    topMatches.forEach(p => {
+      const div = document.createElement("div");
+      div.className = "friendly-suggestion-item";
+      const label = p.is_guest ? `${p.name} (Guest)` : p.name;
+      div.textContent = label;
+      div.dataset.playerId = p.id;
+      div.addEventListener("click", () => {
+        inputEl.value = p.name;
+        inputEl.dataset.playerId = p.id;
+        inputEl.dataset.isGuest = p.is_guest ? "true" : "false";
+        sugEl.innerHTML = "";
+      });
+      sugEl.appendChild(div);
+    });
+  }
+
+  p1Input?.addEventListener("input", () =>
+    buildSuggestions(p1Input, p1Sug)
+  );
+  p2Input?.addEventListener("input", () =>
+    buildSuggestions(p2Input, p2Sug)
+  );
+
+  if (createBtn) {
+    createBtn.addEventListener("click", async () => {
+      showErrorMessage("");
+
+      try {
+        const p1Id = await resolveOrCreatePlayerByName(
+          p1Input.value,
+          { allowGuest: true }
+        );
+
+        const p2Id = await resolveOrCreatePlayerByName(
+          p2Input.value,
+          { allowGuest: true }
+        );
+
+        if (p1Id === p2Id) {
+          throw new Error("Players must be different.");
+        }
+
+        const dateVal = dateInput?.value;
+        const scheduledIso = dateVal
+          ? new Date(dateVal).toISOString()
+          : new Date().toISOString();
+
+        const { data: inserted, error: matchErr } = await supabase
+          .from("matches")
+          .insert({
+            tournament_id: FRIENDLIES_TOURNAMENT_ID,
+            player1_id: p1Id,
+            player2_id: p2Id,
+            status: "scheduled",
+            match_date: scheduledIso,
+            final_sets_player1: 0,
+            final_sets_player2: 0,
+          })
+          .select("id")
+          .maybeSingle();
+
+        if (matchErr || !inserted) {
+          console.error(matchErr);
+          throw new Error("Failed to create friendly match.");
+        }
+
+        const newMatchId = inserted.id;
+        window.location.hash = `#/match/${newMatchId}/${FRIENDLIES_TOURNAMENT_ID}`;
+      } catch (e) {
+        console.error(e);
+        showErrorMessage(e.message || "Failed to create friendly.");
+      }
+    });
+  }
+}
 
 // =======================================================
 // 21. THROWS TABLE RENDERING HELPERS
@@ -3599,6 +4661,17 @@ function handleRoute() {
         loadTournamentMatchSets(parts[4], parts[2]);
         return;
     }
+	
+	// #/tournament/<tid>/structure
+	if (
+		parts[1] === "tournament" &&
+		parts[2] &&
+		parts[3] === "structure"
+	) {
+		loadTournamentStructure(parts[2]);
+		return;
+	}
+
 
     // #/tournament/<tid>/overview?tab=...
     if (parts[1] === "tournament" && parts[2]) {

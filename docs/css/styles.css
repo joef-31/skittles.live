@@ -37,6 +37,7 @@ body {
 
 input[type="number"],
 input[type="datetime-local"],
+input[type="text"],
 select {
   background: #0b1f3a;
   color: #ffffff;
@@ -278,6 +279,38 @@ input[type="number"]::-webkit-outer-spin-button {
 input[type="number"] {
   -moz-appearance: textfield;
 }
+
+.form-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 170, 255, 0.35);
+  background: linear-gradient(180deg, #0c1b33, #081225);
+  color: var(--text-main);
+  font-size: 0.9rem;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.25);
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 110px;
+}
+
+.form-input::file-selector-button {
+  margin-right: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(120, 170, 255, 0.15);
+  color: var(--accent);
+  cursor: pointer;
+}
+
 
 .overlay-backdrop {
   position: fixed;
@@ -996,6 +1029,7 @@ input[type="number"] {
 
 .score-btn {
   min-width: 36px;
+  min-height: 44px;
   text-align: center;
   padding: 8px 0;
   border-radius: 8px;
@@ -1258,9 +1292,9 @@ input[type="number"] {
     background: transparent;
 }
 
-.pill-live {
+.pill-green {
   background: rgba(0, 170, 255, 0.18);
-  color: #bfe9ff;
+  color: var(--live);
 }
 
 .pill-red {
@@ -1390,7 +1424,53 @@ input[type="number"] {
   line-height: 1;
 }
 
+/* Bulk Fixture uploader */
 
+.bulk-upload-wrapper {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.bulk-body.hidden {
+  display: none;
+}
+
+.bulk-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bulk-header {
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 4px;
+}
+
+.bulk-chevron {
+  text-align: right;
+  transition: transform 0.2s ease;
+}
+
+.bulk-header.open .bulk-chevron {
+  transform: rotate(90deg);
+}
+
+.bulk-body {
+  margin-top: 6px;
+}
+
+/* Generic hidden helper */
+.hidden {
+  display: none !important;
+}
+
+/* Bulk upload accordion body */
+#bulk-body {
+  margin-top: 6px;
+}
 
 /* Responsive tweaks */
 
@@ -1408,7 +1488,7 @@ input[type="number"] {
     min-width: 32px;
     max-width: 36px;
     padding: 0 4px;
-    font-size: 0.65rem;
+    font-size: 0.3rem;
     letter-spacing: 0.04em;
   }
   .live-throwstrip-row {
