@@ -1,15 +1,22 @@
 // ===========================================================
-// Supabase setup
+// Supabase setup (SINGLE SOURCE OF TRUTH)
 // ===========================================================
 
 const SUPABASE_URL = "https://gewdiegidqkfvikxscts.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdld2RpZWdpZHFrZnZpa3hzY3RzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ2NjQwNDIsImV4cCI6MjA4MDI0MDA0Mn0.6qMeXabS49vULjxjlksbX2eXLDVyyChSxZPYKw2RAw4";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdld2RpZWdpZHFrZnZpa3hzY3RzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ2NjQwNDIsImV4cCI6MjA4MDI0MDA0Mn0.6qMeXabS49vULjxjlksbX2eXLDVyyChSxZPYKw2RAw4";
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabaseClient = supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY
+);
 
-// Make supabase available to other modules if needed
-window.supabaseClient = supabase;
+// Lock it in place
+Object.defineProperty(window, "supabaseClient", {
+  value: supabaseClient,
+  writable: false,
+  configurable: false
+});
+
 
 // ===========================================================
 // DATABASE HELPERS – SETS & THROWS
@@ -129,7 +136,7 @@ async function dbInsertThrow({
     is_fault: !!isFault,
   };
 
-  const { data, error } = await supabase.from("throws").insert(record);
+  const { data, error } = await supabaseClient.from("throws").insert(record);
 
   if (error) {
     console.error("dbInsertThrow error:", error, record);

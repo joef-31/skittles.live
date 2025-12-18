@@ -23,8 +23,13 @@ window.tournamentContext = {
     groupId: null,
     activeOverviewTab: "overview",
 	defaultTab: null,
-	manageSubview: null
+	manageSubview: null,
+	selectedBracketId: null,
+	bracketRoundIndex: 0
 };
+
+window.tournamentContext.selectedBracketId ??= null;
+window.tournamentContext.bracketRoundIndex ??= 0;
 
 // =======================================================
 // 2. LOW-LEVEL PURE HELPERS (NO DOM, NO SIDE EFFECTS)
@@ -152,6 +157,25 @@ function flagPNG(country) {
     return `<img class="flag-icon" src="/assets/flags/${iso}.svg">`;
 }
 
+	function tournamentStorageKey(tournamentId) {
+	  return `tournament:view:${tournamentId}`;
+	}
+	
+	function persistTournamentView(tournamentId) {
+	  if (!tournamentId) return;
+
+	  const payload = {
+		editionId: window.tournamentContext.editionId || null,
+		stageId: window.tournamentContext.stageId || null,
+		bracketId: window.tournamentContext.selectedBracketId || null
+	  };
+
+	  localStorage.setItem(
+		tournamentStorageKey(tournamentId),
+		JSON.stringify(payload)
+	  );
+	}
+
 // =======================================================
 // 4. AUTH, PERMISSIONS & ROLE HELPERS
 // =======================================================
@@ -195,15 +219,21 @@ function renderAuthControls() {
 
 
 (async () => {
-  if (typeof initAuth === "function") {
-    await initAuth();
-  } else {
-    console.warn("[auth] initAuth not found");
+  if (!window.supabaseClient) {
+    console.error("[init] supabaseClient missing");
+    return;
   }
 
-  renderAuthControls();   // ← REQUIRED
-})();
+  if (typeof initAuth === "function") {
+    await initAuth();
+  }
 
+  if (typeof initRealtimeSubscriptions === "function") {
+    initRealtimeSubscriptions();
+  }
+
+  renderAuthControls();
+})();
 
 function isSuperAdmin() {
     return typeof SUPERADMIN !== "undefined" && SUPERADMIN === true;
@@ -278,7 +308,7 @@ async function resolveOrCreatePlayerByName(
     if (!clean) throw new Error("Player name required.");
 
     // Try exact match first
-    const { data: existing } = await supabase
+    const { data: existing } = await window.supabaseClient
         .from("players")
         .select("id, is_guest")
         .ilike("name", clean)
@@ -297,7 +327,7 @@ async function resolveOrCreatePlayerByName(
         throw new Error("Guest players are not allowed here.");
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await window.supabaseClient
         .from("players")
         .insert({
             name: clean,
@@ -660,11 +690,20 @@ async function loadTournaments() {
 		{ data: tournamentsData, error: tournamentsError },
 		{ data: matchesData, error: matchesError },
 	] = await Promise.all([
-		supabase
+		window.supabaseClient
 			.from("tournaments")
 			.select("id, name")
 			.order("name", { ascending: true }),
-		supabase.from("matches").select("id, tournament_id, match_date"),
+		window.supabaseClient
+		  .from("matches")
+		  .select(`
+			id,
+			tournament_id,
+			match_date,
+			status,
+			player1_id,
+			player2_id
+		  `),
 	]);
 
 	if (tournamentsError) {
@@ -679,6 +718,7 @@ async function loadTournaments() {
 
 	let tournaments = tournamentsData || [];
 	const matches = matchesData || [];
+	window.currentMatches = matches;
 
 	// Build date → set of tournament IDs (excluding Friendlies),
 	// and collect ALL dates where *any* match exists (including friendlies)
@@ -686,23 +726,32 @@ async function loadTournaments() {
 	const allDatesSet = new Set();
 
 	matches.forEach((m) => {
-		if (!m.match_date) return;
-		const d = isoDateOnly(m.match_date);
-		if (!d) return;
+	  // HARD EXCLUSIONS
+	  if (
+		!m.match_date ||
+		m.status === "structure" ||
+		!m.player1_id ||
+		!m.player2_id
+	  ) {
+		return;
+	  }
 
-		// All match dates (for bar)
-		allDatesSet.add(d);
+	  const d = isoDateOnly(m.match_date);
+	  if (!d) return;
 
-		// Only "real" tournaments drive which cards are shown
-		if (
-			m.tournament_id &&
-			m.tournament_id !== FRIENDLIES_TOURNAMENT_ID
-		) {
-			if (!dateToTournamentIds[d]) {
-				dateToTournamentIds[d] = new Set();
-			}
-			dateToTournamentIds[d].add(m.tournament_id);
+	  // Only REAL matches contribute dates
+	  allDatesSet.add(d);
+
+	  // Only real tournaments drive which cards are shown
+	  if (
+		m.tournament_id &&
+		m.tournament_id !== FRIENDLIES_TOURNAMENT_ID
+	  ) {
+		if (!dateToTournamentIds[d]) {
+		  dateToTournamentIds[d] = new Set();
 		}
+		dateToTournamentIds[d].add(m.tournament_id);
+	  }
 	});
 
 	// Remove Friendlies from the sorted list so we can force it last as a special card
@@ -773,7 +822,7 @@ updateBottomBar();
 }
 
 async function ensureFriendliesTournamentExists() {
-    const { error } = await supabase.from("tournaments").upsert(
+    const { error } = await window.supabaseClient.from("tournaments").upsert(
         {
             id: FRIENDLIES_TOURNAMENT_ID,
             name: "Friendlies",
@@ -805,17 +854,41 @@ function renderTournamentSelectors(editions, stages) {
         )
         .join("");
 
-    const stageOptions = stages
-        .map(
-            (s) => `
-        <option value="${s.id}" ${
-                s.id === window.tournamentContext.stageId ? "selected" : ""
-            }>
-            ${s.name}
-        </option>
-    `
-        )
-        .join("");
+    // -----------------------------
+	// Build Stage / Bracket options
+	// -----------------------------
+
+	// 1) Group stages (non-knockout)
+	const groupStageOptions = stages
+	  .filter(s => s.stage_type !== "knockout")
+	  .map(s => `
+		<option value="stage:${s.id}" ${
+		  s.id === window.tournamentContext.stageId ? "selected" : ""
+		}>
+		  ${s.name}
+		</option>
+	  `);
+
+	// 2) Knockout brackets (one per bracket_id)
+	const bracketMap = {};
+	stages
+	  .filter(s => s.stage_type === "knockout" && s.bracket_id)
+	  .forEach(s => {
+		if (!bracketMap[s.bracket_id]) {
+		  bracketMap[s.bracket_id] = s;
+		}
+	  });
+
+	const bracketOptions = Object.keys(bracketMap).map(bracketId => `
+	  <option value="bracket:${bracketId}" ${
+		bracketId === window.tournamentContext.selectedBracketId ? "selected" : ""
+	  }>
+		Knockout – ${bracketId}
+	  </option>
+	`);
+
+	const stageOptions = [...groupStageOptions, ...bracketOptions].join("");
+
 
     return `
 <div class="selectors-row">
@@ -991,7 +1064,7 @@ async function loadTournamentsMenu() {
 
 	showLoading("Loading tournaments…");
 
-	const { data, error } = await supabase
+	const { data, error } = await window.supabaseClient
 		.from("tournaments")
 		.select("id, name, country, type")
 		.neq("id", FRIENDLIES_TOURNAMENT_ID)
@@ -1026,6 +1099,36 @@ async function loadTournamentOverview(tournamentId) {
 	  window.tournamentContext.manageSubview = null;
 	}
   
+	// ------------------------------------
+	// Restore persisted tournament view
+	// ------------------------------------
+	const storageKey = tournamentStorageKey(tournamentId);
+	const persisted = localStorage.getItem(storageKey);
+
+	if (persisted) {
+	try {
+	const parsed = JSON.parse(persisted);
+
+	if (!window.tournamentContext.editionId && parsed.editionId) {
+	  window.tournamentContext.editionId = parsed.editionId;
+	}
+
+	if (!window.tournamentContext.stageId && parsed.stageId) {
+	  window.tournamentContext.stageId = parsed.stageId;
+	}
+
+	if (
+	  !window.tournamentContext.selectedBracketId &&
+	  parsed.bracketId
+	) {
+	  window.tournamentContext.selectedBracketId = parsed.bracketId;
+	}
+
+		} catch {
+		/* ignore corrupt storage */
+		}
+	}
+
   showBackButton(() => {
     window.location.hash = "#/tournaments";
   });
@@ -1035,7 +1138,7 @@ async function loadTournamentOverview(tournamentId) {
   showLoading("Loading tournament overview…");
 
   // 1) Load base tournament data
-  const { data: tournament, error: tError } = await supabase
+  const { data: tournament, error: tError } = await window.supabaseClient
     .from("tournaments")
     .select("id, name, country, type")
     .eq("id", tournamentId)
@@ -1052,7 +1155,7 @@ async function loadTournamentOverview(tournamentId) {
   const tournamentName = tournament.name || "Tournament";
 
   // 2) Load editions for this tournament
-  const { data: editions, error: editionsError } = await supabase
+  const { data: editions, error: editionsError } = await window.supabaseClient
     .from("editions")
     .select("id, name")
     .eq("tournament_id", tournamentId)
@@ -1078,11 +1181,11 @@ async function loadTournamentOverview(tournamentId) {
   }
 
   // 3) Load stages for the selected edition
-  const { data: stages, error: stagesError } = await supabase
-    .from("stages")
-    .select("id, name, edition_id, order_index")
-    .eq("edition_id", window.tournamentContext.editionId)
-    .order("order_index", { ascending: true });
+	const { data: stages, error: stagesError } = await window.supabaseClient
+	  .from("stages")
+	  .select("id, name, stage_type, bracket_id, edition_id, order_index")
+	  .eq("edition_id", window.tournamentContext.editionId)
+	  .order("order_index", { ascending: true });
 	
 	window.currentEditions = editions || [];
 	window.currentStages = stages || [];
@@ -1098,16 +1201,19 @@ async function loadTournamentOverview(tournamentId) {
     return;
   }
 
-  // Ensure we have a valid stageId in context
-  if (
-    !window.tournamentContext.stageId ||
-    !stages.some(s => s.id === window.tournamentContext.stageId)
-  ) {
-    window.tournamentContext.stageId = stages[0].id;
-  }
+	// Ensure we have a valid stageId in context
+	// BUT do NOT auto-select a stage when a bracket is selected
+	if (!window.tournamentContext.selectedBracketId) {
+	  if (
+		!window.tournamentContext.stageId ||
+		!stages.some(s => s.id === window.tournamentContext.stageId)
+	  ) {
+		window.tournamentContext.stageId = stages[0].id;
+	  }
+	}
 
   // 3b) Load ALL stages for manage tab (for all editions)
-  const { data: allStages, error: allStagesError } = await supabase
+  const { data: allStages, error: allStagesError } = await window.supabaseClient
     .from("stages")
     .select("id, name, edition_id, stage_type, order_index")
     .in(
@@ -1119,26 +1225,56 @@ async function loadTournamentOverview(tournamentId) {
     console.error(allStagesError);
   }
 
-  // 4) Load matches filtered by edition + stage
-  const { data: matchesRaw, error: matchError } = await supabase
-    .from("matches")
-    .select(`
-      id,
-      match_date,
-      status,
-      final_sets_player1,
-      final_sets_player2,
-      player1:player1_id ( id, name ),
-      player2:player2_id ( id, name ),
-      tournament:tournament_id ( id, name, country, type ),
-      edition_id,
-      stage_id,
-	  group_id
-    `)
-    .eq("tournament_id", tournamentId)
-    .eq("edition_id", window.tournamentContext.editionId)
-    .eq("stage_id", window.tournamentContext.stageId)
-    .order("match_date", { ascending: true });
+	// 4) Load matches filtered by edition + stage OR bracket
+	let matchQuery = window.supabaseClient
+	  .from("matches")
+	  .select(`
+		id,
+		match_date,
+		status,
+		final_sets_player1,
+		final_sets_player2,
+		bracket_meta,
+		player1:player1_id ( id, name ),
+		player2:player2_id ( id, name ),
+		tournament:tournament_id ( id, name, country, type ),
+		edition_id,
+		stage_id,
+		group_id
+	  `)
+	  .eq("tournament_id", tournamentId)
+	  .eq("edition_id", window.tournamentContext.editionId);
+
+	// ------------------------------------
+	// Group stage view (single stage)
+	// ------------------------------------
+	if (window.tournamentContext.stageId) {
+	  matchQuery = matchQuery.eq(
+		"stage_id",
+		window.tournamentContext.stageId
+	  );
+	}
+
+	// ------------------------------------
+	// Bracket view (all rounds in bracket)
+	// ------------------------------------
+	if (window.tournamentContext.selectedBracketId) {
+	  const bracketStageIds = window.currentStages
+		.filter(
+		  s =>
+			s.stage_type === "knockout" &&
+			s.bracket_id === window.tournamentContext.selectedBracketId
+		)
+		.map(s => s.id);
+
+	  if (bracketStageIds.length) {
+		matchQuery = matchQuery.in("stage_id", bracketStageIds);
+	  }
+	}
+
+	const { data: matchesRaw, error: matchError } =
+	  await matchQuery.order("match_date", { ascending: true });
+
 
   if (matchError) {
     console.error(matchError);
@@ -1147,6 +1283,18 @@ async function loadTournamentOverview(tournamentId) {
   }
 
   const matches = matchesRaw || [];
+  
+  window.currentMatches = matches;
+  
+  console.log("MATCHES DEBUG", {
+	  tournamentId,
+	  editionId: window.tournamentContext.editionId,
+	  selectedStageId: window.tournamentContext.stageId,
+	  selectedBracketId: window.tournamentContext.selectedBracketId,
+	  loadedMatchesCount: matches.length,
+	  loadedMatchStageIds: matches.map(m => m.stage_id)
+	});
+
 
   // Populate the global player cache for this tournament
   buildTournamentPlayers(matches);
@@ -1185,16 +1333,40 @@ async function loadTournamentOverview(tournamentId) {
   `);
 
   // 6) Wire selectors to reload with new context
-  document.getElementById("edition-select")?.addEventListener("change", e => {
-    window.tournamentContext.editionId = e.target.value;
-    window.tournamentContext.stageId = null; // reset stage
-    loadTournamentOverview(tournamentId);
-  });
+	document.getElementById("edition-select")?.addEventListener("change", e => {
+	  window.tournamentContext.editionId = e.target.value;
+	  window.tournamentContext.stageId = null;
+	  window.tournamentContext.bracketId = null;
 
-  document.getElementById("stage-select")?.addEventListener("change", e => {
-    window.tournamentContext.stageId = e.target.value;
-    loadTournamentOverview(tournamentId);
-  });
+	  persistTournamentView(tournamentId);
+	  loadTournamentOverview(tournamentId);
+	});
+
+	document.getElementById("stage-select")?.addEventListener("change", e => {
+	  const value = e.target.value;
+
+	  // ---- GROUP STAGE SELECTED ----
+	  if (value.startsWith("stage:")) {
+		window.tournamentContext.stageId =
+		  value.replace("stage:", "");
+
+		window.tournamentContext.selectedBracketId = null;
+		window.tournamentContext.bracketRoundIndex = 0;
+	  }
+
+	  // ---- BRACKET SELECTED ----
+	  if (value.startsWith("bracket:")) {
+		window.tournamentContext.selectedBracketId =
+		  value.replace("bracket:", "");
+
+		window.tournamentContext.stageId = null; //  THIS WAS MISSING
+		window.tournamentContext.bracketRoundIndex = 0;
+	  }
+
+	  persistTournamentView(tournamentId);
+	  loadTournamentOverview(tournamentId);
+	});
+
 
   // 7) Render tabs
 	renderTournamentDailyTab(matches);
@@ -1251,6 +1423,15 @@ async function loadTournamentOverview(tournamentId) {
 	tournamentId: tournamentId
 	});
 updateBottomBar();
+
+console.log(
+  "STAGES LOADED:",
+  window.currentStages.map(s => ({
+    name: s.name,
+    type: s.stage_type,
+    bracket: s.bracket_id
+  }))
+);
 }
 
 async function loadTournamentStructure(tournamentId) {
@@ -1265,7 +1446,7 @@ async function loadTournamentStructure(tournamentId) {
 
   showLoading("Loading structure…");
 
-  const { data: editions, error: edErr } = await supabase
+  const { data: editions, error: edErr } = await window.supabaseClient
     .from("editions")
     .select("id,name")
     .eq("tournament_id", tournamentId)
@@ -1294,39 +1475,30 @@ async function loadTournamentStructure(tournamentId) {
 function resolveAdvancementForPosition(position, totalRows, rules) {
   if (!Array.isArray(rules) || !rules.length) return null;
 
-  let winnerCount = 0;
-  let runnerUpCount = 0;
-
-  // Pre-read quantities so ranges line up correctly
-  for (const r of rules) {
-    if (r.condition === "winner" || r.condition === "best_placed") {
-      winnerCount = Number(r.quantity || 1);
-    }
-    if (r.condition === "runner_up") {
-      runnerUpCount = Number(r.quantity || 1);
-    }
-  }
-
-  const winnerStart = 1;
-  const winnerEnd = winnerCount;
-
-  const runnerUpStart = winnerEnd + 1;
-  const runnerUpEnd = runnerUpStart + runnerUpCount - 1;
-
   for (const rule of rules) {
     switch (rule.condition) {
       case "winner":
-      case "best_placed":
-        if (position >= winnerStart && position <= winnerEnd) {
+      case "best_placed": {
+        // Top N positions
+        const qty = Number(rule.quantity || 1);
+        if (position >= 1 && position <= qty) {
           return rule;
         }
         break;
+      }
 
-      case "runner_up":
-        if (position >= runnerUpStart && position <= runnerUpEnd) {
+      case "runner_up": {
+        // Explicit next band after winners
+        // Default start = 2 if not specified
+        const start = Number(rule.position || 2);
+        const qty = Number(rule.quantity || 1);
+        const end = start + qty - 1;
+
+        if (position >= start && position <= end) {
           return rule;
         }
         break;
+      }
 
       case "nth_place": {
         if (!rule.position) break;
@@ -1342,6 +1514,7 @@ function resolveAdvancementForPosition(position, totalRows, rules) {
       }
 
       case "loser": {
+        // Bottom N positions
         const qty = Number(rule.quantity || 1);
         const start = totalRows - qty + 1;
 
@@ -1359,7 +1532,6 @@ function resolveAdvancementForPosition(position, totalRows, rules) {
   // Explicit "Others" (no advancement)
   return null;
 }
-
 
 function renderStandingsTable(matches, sets, groups, container, advancementRules = []) {
 	const matchesByGroup = new Map();
@@ -1606,6 +1778,14 @@ function renderStandingsTable(matches, sets, groups, container, advancementRules
 	});
 }
 
+function isPlayableMatch(m) {
+  return (
+    m.player1?.id &&
+    m.player2?.id &&
+    m.status !== "structure"
+  );
+}
+
 function renderMatchCards(
     matches,
     tournamentId,
@@ -1704,53 +1884,71 @@ function renderMatchCards(
 // DAILY
 // -----------------------
 
-function renderTournamentDailyTab(matches, dateFilter = null) {
-    const container = document.getElementById("tab-daily");
-    if (!container) return;
+function renderTournamentDailyTab(matches) {
+  const container = document.getElementById("tab-daily");
+  if (!container) return;
 
-    let filtered = matches;
+  // ------------------------------------
+  // Ensure selected date exists (FIRST LOAD FIX)
+  // ------------------------------------
+  if (!window.tournamentContext.selectedDate) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    window.tournamentContext.selectedDate = today.toISOString();
+  }
 
-    if (dateFilter) {
-        filtered = matches.filter(
-            m => isoDateOnly(m.match_date) === dateFilter
-        );
-    }
+  const selectedDate = new Date(window.tournamentContext.selectedDate);
 
-    // IMPORTANT: clear container every time
-    container.innerHTML = "";
+  // ------------------------------------
+  // Filter matches for selected day
+  // ------------------------------------
+  const filtered = matches.filter(m => {
+    if (!m.match_date) return false;
 
-    if (!filtered.length) {
-        container.innerHTML =
-            `<div class="empty-message">No matches scheduled for this day.</div>`;
-        return;
-    }
-
-    // CRITICAL FIX: pass FILTERED, not matches
-    renderMatchCards(
-        filtered,
-        window.currentTournamentId,
-        {},          // liveSetByMatch (unchanged)
-        null,        // dateFilter already applied
-        "tab-daily"  // target container
+    const d = new Date(m.match_date);
+    return (
+      d.getFullYear() === selectedDate.getFullYear() &&
+      d.getMonth() === selectedDate.getMonth() &&
+      d.getDate() === selectedDate.getDate()
     );
-	
-	// Prime liveboxes if a set is already in progress
-	document.querySelectorAll(".card[data-mid]").forEach(card => {
-		const mid = card.dataset.mid;
-		const live = window.liveSetByMatch?.[mid];
-		if (!live) return;
+  });
 
-		const boxes = card.querySelectorAll(".mc-livebox");
-		if (boxes.length !== 2) return;
+  // ------------------------------------
+  // Render
+  // ------------------------------------
+  container.innerHTML = "";
 
-		boxes[0].textContent = live.p1 ?? "";
-		boxes[1].textContent = live.p2 ?? "";
-		boxes[0].classList.add("is-live");
-		boxes[1].classList.add("is-live");
-	});
+  if (!filtered.length) {
+    container.innerHTML =
+      `<div class="empty-message">No matches scheduled for this day.</div>`;
+    return;
+  }
 
+  renderMatchCards(
+    filtered,
+    window.currentTournamentId,
+    {},          // liveSetByMatch (unchanged)
+    null,        // date already applied
+    "tab-daily"
+  );
+
+  // ------------------------------------
+  // Prime live boxes
+  // ------------------------------------
+  document.querySelectorAll("#tab-daily .card[data-mid]").forEach(card => {
+    const mid = card.dataset.mid;
+    const live = window.liveSetByMatch?.[mid];
+    if (!live) return;
+
+    const boxes = card.querySelectorAll(".mc-livebox");
+    if (boxes.length !== 2) return;
+
+    boxes[0].textContent = live.p1 ?? "";
+    boxes[1].textContent = live.p2 ?? "";
+    boxes[0].classList.add("is-live");
+    boxes[1].classList.add("is-live");
+  });
 }
-
 
 // -----------------------
 // FIXTURES
@@ -1784,108 +1982,801 @@ function renderTournamentFixturesTab(matches) {
 // -----------------------
 
 function renderTournamentResultsTab(matches) {
-	const el = document.getElementById("tab-results");
-    const finished = matches.filter(m => m.status === "finished");
+  const el = document.getElementById("tab-results");
 
-    if (!finished.length) {
-        el.innerHTML =
-            `<div class="empty-message">No results yet.</div>`;
-        return;
-    }
+  const finished = matches
+    .filter(m => m.status === "finished")
+    .sort((a, b) => {
+      const da = a.match_date ? new Date(a.match_date) : 0;
+      const db = b.match_date ? new Date(b.match_date) : 0;
+      return db - da; // newest first
+    });
 
-    el.innerHTML = `<div id="tab-matches"></div>`;
+  if (!finished.length) {
+    el.innerHTML =
+      `<div class="empty-message">No results yet.</div>`;
+    return;
+  }
 
-    renderMatchCards(
-        finished,
-        window.currentTournamentId,
-        {},
-        null,
-        "tab-results"
-    );
+  el.innerHTML = `<div id="tab-matches"></div>`;
+
+  renderMatchCards(
+    finished,
+    window.currentTournamentId,
+    {},
+    null,
+    "tab-results"
+  );
 }
 
 // -----------------------
 // STANDINGS
 // -----------------------
 
-async function renderTournamentStandingsTab(tournamentId, matches) {
-    const el = document.getElementById("tab-standings");
-    if (!el) return;
+async function renderTournamentStandingsTab(tournamentId) {
+  const el = document.getElementById("tab-standings");
+  if (!el) return;
 
-    // Load sets for all matches in this tournament context
-    const matchIds = matches.map(m => m.id).filter(Boolean);
+  el.innerHTML = "";
 
-    if (!matchIds.length) {
-        el.innerHTML =
-            `<div class="empty-message">No results yet.</div>`;
-        return;
-    }
+  // -----------------------------
+  // ENSURE MATCHES ARE AVAILABLE
+  // -----------------------------
+  const matches = window.currentMatches;
+  if (!Array.isArray(matches)) {
+    console.warn("Standings render skipped – matches not loaded yet");
+    return;
+  }
 
-    const { data: sets, error } = await supabase
-        .from("sets")
-        .select("*")
-        .in("match_id", matchIds);
+  // ------------------------------------
+  // Load advancement rules FIRST
+  // ------------------------------------
+  const { data: rulesData, error: rulesError } = await window.supabaseClient
+    .from("advancement_rules")
+    .select(`
+      id,
+      source_stage_id,
+      condition,
+      position,
+      quantity,
+      layer,
+      target_stage_id,
+      description
+    `)
+    .in(
+      "source_stage_id",
+      window.currentStages.map(s => s.id)
+    )
+    .order("layer", { ascending: true });
 
-    if (error) {
-        console.error(error);
-        el.innerHTML =
-            `<div class="error">Failed to load standings.</div>`;
-        return;
-    }
-	
-	const stageId = window.tournamentContext?.stageId;
+  if (rulesError) {
+    console.error(rulesError);
+  }
 
-	let groups = [];
+  const advancementRules = rulesData || [];
 
-	if (stageId) {
-	  const { data: groupData, error: groupError } = await supabase
-		.from("groups")
-		.select("id, name")
-		.eq("stage_id", stageId)
-		.order("name");
+  // ------------------------------------
+  // BUILD + STORE GRAPH ONCE
+  // ------------------------------------
+  const stageGraph = buildStageGraph(
+    window.currentStages,
+    advancementRules
+  );
 
-	  if (groupError) {
-		console.error(groupError);
-	  } else {
-		groups = groupData || [];
-	  }
-	}
+  // IMPORTANT: persist for bracket navigation callbacks
+  window.stageGraph = stageGraph;
 
-	// ------------------------------------
-	// Load advancement rules for this stage
-	// ------------------------------------
-	let advancementRules = [];
+  // ------------------------------------
+  // BRACKET VIEW
+  // ------------------------------------
+  if (window.tournamentContext.selectedBracketId) {
+    renderBracketDraw(matches, stageGraph);
+    return;
+  }
 
-	if (stageId) {
-	  const { data: rulesData, error: rulesError } = await supabase
-		.from("advancement_rules")
-		.select(`
-		  id,
-		  condition,
-		  position,
-		  quantity,
-		  layer,
-		  target_stage_id,
-		  description
-		`)
-		.eq("source_stage_id", stageId)
-		.order("layer", { ascending: true });
+  // ------------------------------------
+  // NORMAL STAGE VIEW
+  // ------------------------------------
+  const stageId = window.tournamentContext?.stageId;
+  if (!stageId) {
+    el.innerHTML = `<div class="empty-message">No stage selected.</div>`;
+    return;
+  }
 
-	  if (rulesError) {
-		console.error(rulesError);
-	  } else {
-		advancementRules = rulesData || [];
-	  }
-	}
+  const stage = window.currentStages?.find(s => s.id === stageId);
+  if (!stage) {
+    el.innerHTML = `<div class="error">Stage not found.</div>`;
+    return;
+  }
 
-	renderStandingsTable(
-	  matches,
-	  sets || [],
-	  groups || [],
-	  el,
-	  advancementRules
-	);
+  // ------------------------------------
+  // KNOCKOUT STAGE → DRAW (non-bracket)
+  // ------------------------------------
+  if (stage.stage_type === "knockout") {
+    const drawStages = getConnectedKnockoutStages(
+      stageGraph,
+      stageId
+    );
+
+    const drawWrap = document.createElement("div");
+    drawWrap.id = "draw-scroll";
+    el.appendChild(drawWrap);
+
+    renderKnockoutDraw({
+      stages: drawStages,
+      matches,
+      stageGraph
+    });
+
+    return;
+  }
+
+  // ------------------------------------
+  // GROUP STAGE → STANDINGS
+  // ------------------------------------
+  const matchIds = matches.map(m => m.id).filter(Boolean);
+
+  if (!matchIds.length) {
+    el.innerHTML = `<div class="empty-message">No results yet.</div>`;
+    return;
+  }
+
+  const { data: sets, error } = await window.supabaseClient
+    .from("sets")
+    .select("*")
+    .in("match_id", matchIds);
+
+  if (error) {
+    console.error(error);
+    el.innerHTML = `<div class="error">Failed to load standings.</div>`;
+    return;
+  }
+
+  let groups = [];
+  const { data: groupData, error: groupError } = await window.supabaseClient
+    .from("groups")
+    .select("id, name")
+    .eq("stage_id", stageId)
+    .order("name");
+
+  if (!groupError) {
+    groups = groupData || [];
+  }
+
+  renderStandingsTable(
+    matches,
+    sets || [],
+    groups,
+    el,
+    advancementRules
+  );
+
+  console.log("Standings tab:", stage.name, stage.stage_type);
 }
+
+// -----------------------
+// BRACKET
+// -----------------------
+
+function getConnectedKnockoutStages(stageGraph, startStageId) {
+  const visited = new Set();
+  const stack = [startStageId];
+
+  while (stack.length) {
+    const current = stack.pop();
+    if (visited.has(current)) continue;
+
+    visited.add(current);
+
+    stageGraph.edges.forEach(edge => {
+      if (edge.from_stage_id === current) {
+        stack.push(edge.to_stage_id);
+      }
+      if (edge.to_stage_id === current) {
+        stack.push(edge.from_stage_id);
+      }
+    });
+  }
+
+  return [...visited]
+    .map(id => stageGraph.stages[id])
+    .filter(s => s.stage_type === "knockout");
+}
+
+
+function buildStageGraph(stages, advancementRules) {
+  if (!Array.isArray(stages)) {
+    throw new Error("buildStageGraph: stages must be an array");
+  }
+
+  if (!Array.isArray(advancementRules)) {
+    throw new Error("buildStageGraph: advancementRules must be an array");
+  }
+
+  // -------------------------
+  // Index stages
+  // -------------------------
+  const stagesById = {};
+  stages.forEach(stage => {
+    stagesById[stage.id] = {
+      id: stage.id,
+      name: stage.name,
+      stage_type: stage.stage_type,
+      order: stage.order
+    };
+  });
+
+  // -------------------------
+  // Build edges
+  // -------------------------
+  const edges = [];
+
+  advancementRules.forEach(rule => {
+    const fromStage = stagesById[rule.source_stage_id];
+    const toStage   = stagesById[rule.target_stage_id];
+
+    if (!fromStage) {
+      console.warn(
+        "Advancement rule ignored: source stage not found",
+        rule
+      );
+      return;
+    }
+
+    if (!toStage) {
+      console.warn(
+        "Advancement rule ignored: target stage not found",
+        rule
+      );
+      return;
+    }
+
+    edges.push({
+      from_stage_id: rule.source_stage_id,
+      to_stage_id: rule.target_stage_id,
+
+      condition: rule.condition,              // winner | loser | position | all
+      quantity: rule.quantity ?? null,         // null for knockouts
+      position: rule.position ?? null,         // group stages only
+
+      layer: rule.layer ?? 0,
+
+      rule_id: rule.id
+    });
+  });
+
+  // -------------------------
+  // Deterministic ordering
+  // -------------------------
+  edges.sort((a, b) => {
+    const aOrder = stagesById[a.from_stage_id].order;
+    const bOrder = stagesById[b.from_stage_id].order;
+
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    if (a.layer !== b.layer) return a.layer - b.layer;
+    return a.condition.localeCompare(b.condition);
+  });
+
+  // -------------------------
+  // Final graph
+  // -------------------------
+  return {
+    stages: stagesById,
+    edges
+  };
+}
+
+function getBracketRounds(bracketId) {
+  return window.currentStages
+    .filter(s => s.bracket_id === bracketId)
+    .sort((a, b) => a.order_index - b.order_index);
+}
+
+function getCurrentBracketIndex() {
+  return window.tournamentContext.bracketRoundIndex ?? 0;
+}
+
+function jumpBracketIndex(delta) {
+  const rounds = getBracketRounds(window.tournamentContext.selectedBracketId);
+  let idx = getCurrentBracketIndex() + delta;
+
+  idx = Math.max(0, Math.min(idx, rounds.length - 1));
+  window.tournamentContext.bracketRoundIndex = idx;
+
+  renderBracketDraw(window.currentMatches, window.stageGraph);
+}
+
+
+function getIncomingStageId(stageGraph, stageId) {
+  const edge = stageGraph.edges.find(
+    e => e.to_stage_id === stageId
+  );
+  return edge?.from_stage_id || null;
+}
+
+function getOutgoingStageId(stageGraph, stageId, condition) {
+  const edge = stageGraph.edges.find(
+    e =>
+      e.from_stage_id === stageId &&
+      e.condition === condition
+  );
+  return edge?.to_stage_id || null;
+}
+
+function resolveKnockoutAdvancement(match, stageGraph) {
+  if (!match || match.status !== "completed") {
+    return [];
+  }
+
+  const stageId = match.stage_id;
+
+  // -------------------------
+  // Get routing rules
+  // -------------------------
+  const outgoingEdges = stageGraph.edges.filter(
+    edge => edge.from_stage_id === stageId
+  );
+
+  if (outgoingEdges.length === 0) {
+    return [];
+  }
+
+  // -------------------------
+  // Determine winner / loser
+  // -------------------------
+  const sets = extractValidSets(match);
+
+  const result = determineSetWinner(
+    match.player1_id,
+    match.player2_id,
+    sets
+  );
+
+  if (!result || !result.winner_id || !result.loser_id) {
+    console.warn("Cannot resolve match outcome", match.id);
+    return [];
+  }
+
+  const { winner_id, loser_id } = result;
+
+  // -------------------------
+  // Emit advancement events
+  // -------------------------
+  const events = [];
+
+  outgoingEdges.forEach(edge => {
+    if (edge.condition === "winner") {
+      events.push({
+        source_match_id: match.id,
+        participant_id: winner_id,
+        target_stage_id: edge.to_stage_id,
+        condition: "winner",
+        layer: edge.layer
+      });
+    }
+
+    if (edge.condition === "loser") {
+      events.push({
+        source_match_id: match.id,
+        participant_id: loser_id,
+        target_stage_id: edge.to_stage_id,
+        condition: "loser",
+        layer: edge.layer
+      });
+    }
+  });
+
+  return events;
+}
+
+function getIncomingStage(stageId, stageGraph) {
+  const edge = stageGraph.edges.find(
+    e => e.to_stage_id === stageId
+  );
+  return edge?.from_stage_id || null;
+}
+
+async function renderBracketDraw(matches, stageGraph) {
+	  if (!Array.isArray(matches)) {
+	console.warn("renderBracketDraw called without matches", matches);
+	return;
+	}
+
+	if (!stageGraph) {
+	console.warn("renderBracketDraw called without stageGraph");
+	return;
+	}
+  const el = document.getElementById("tab-standings");
+  if (!el) return;
+
+  el.innerHTML = "";
+
+  const bracketId = window.tournamentContext.selectedBracketId;
+  if (!bracketId) return;
+
+  // ------------------------------------
+  // Collect stages in this bracket
+  // ------------------------------------
+  const bracketStages = window.currentStages.filter(
+    s =>
+      s.stage_type === "knockout" &&
+      s.bracket_id === bracketId
+  );
+
+  if (!bracketStages.length) {
+    el.innerHTML = `<div class="empty-message">No rounds in this bracket.</div>`;
+    return;
+  }
+
+  // ------------------------------------
+  // Order rounds
+  // ------------------------------------
+  const rounds = [...bracketStages].sort(
+    (a, b) => a.order_index - b.order_index
+  );
+
+  // Clamp round index
+  let idx = window.tournamentContext.bracketRoundIndex ?? 0;
+  if (idx < 0) idx = 0;
+  if (idx >= rounds.length) idx = rounds.length - 1;
+  window.tournamentContext.bracketRoundIndex = idx;
+
+  const roundStage = rounds[idx];
+
+  console.log("ROUND DEBUG", {
+    roundIndex: idx,
+    roundStageId: roundStage.id,
+    roundStageName: roundStage.name,
+    matchStageIds: matches.map(m => m.stage_id)
+  });
+
+  // ------------------------------------
+  // Draw mount
+  // ------------------------------------
+  const drawWrap = document.createElement("div");
+  drawWrap.id = "draw-scroll";
+  el.appendChild(drawWrap);
+
+  // ------------------------------------
+  // Filter matches for this round
+  // ------------------------------------
+const roundMatches = matches
+  .filter(m => m.stage_id === roundStage.id)
+  .sort((a, b) => {
+    const aSlot = Number(a?.bracket_meta?.slot_index);
+    const bSlot = Number(b?.bracket_meta?.slot_index);
+
+    const aOk = Number.isFinite(aSlot);
+    const bOk = Number.isFinite(bSlot);
+
+    if (aOk && bOk) return aSlot - bSlot;
+    if (aOk && !bOk) return -1;
+    if (!aOk && bOk) return 1;
+
+    // deterministic fallback
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  // ------------------------------------
+  // Render ONE round via existing renderer
+  // ------------------------------------
+  renderKnockoutDraw({
+    stages: [roundStage],      // single column
+    matches: roundMatches,
+    stageGraph
+  });
+}
+
+function renderKnockoutDraw({ stages, matches, stageGraph }) {
+  const container = document.getElementById("draw-scroll");
+  if (!container) return;
+
+  container.innerHTML = "";
+  container.className = "draw-scroll";
+
+  stages.forEach(stage => {
+    const stageCol = document.createElement("div");
+    stageCol.className = "draw-stage-column";
+
+    const header = document.createElement("div");
+    header.className = "draw-stage-header";
+    header.textContent = stage.name;
+    stageCol.appendChild(header);
+
+    const matchesWrap = document.createElement("div");
+    matchesWrap.className = "draw-stage-matches";
+
+    // IMPORTANT: matches already sorted by slot_index
+    const stageMatches = matches;
+
+    if (!stageMatches.length) {
+      const empty = document.createElement("div");
+      empty.className = "draw-empty";
+      empty.textContent = "No matches";
+      matchesWrap.appendChild(empty);
+    } else {
+      stageMatches.forEach(match => {
+        matchesWrap.appendChild(
+          renderDrawMatchCard(match, stageGraph)
+        );
+      });
+    }
+
+    stageCol.appendChild(matchesWrap);
+    container.appendChild(stageCol);
+  });
+}
+
+
+async function buildBracketMetadataForEdition(editionId) {
+  if (!editionId) return;
+
+  // 1. Load knockout stages
+  const { data: stages } = await window.supabaseClient
+    .from("stages")
+    .select("id, bracket_id, order_index")
+    .eq("edition_id", editionId)
+    .eq("stage_type", "knockout");
+
+  if (!stages?.length) return;
+
+  // 2. Load matches
+  const { data: matches } = await window.supabaseClient
+    .from("matches")
+    .select("id, stage_id, created_at")
+    .eq("edition_id", editionId);
+
+  if (!matches?.length) return;
+
+  // 3. Group stages by bracket
+  const stagesByBracket = {};
+  for (const s of stages) {
+    if (!s.bracket_id) continue;
+    (stagesByBracket[s.bracket_id] ||= []).push(s);
+  }
+
+  // 4. Build + persist metadata
+  for (const [bracketId, bracketStages] of Object.entries(stagesByBracket)) {
+    const rounds = [...bracketStages].sort(
+      (a, b) => a.order_index - b.order_index
+    );
+
+    rounds.forEach((stage, roundIndex) => {
+      const stageMatches = matches
+        .filter(m => m.stage_id === stage.id)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+      stageMatches.forEach(async (match, slotIndex) => {
+        const bracket_meta = {
+          bracket_id: bracketId,
+          round_index: roundIndex,
+          slot_index: slotIndex,
+          path: null,
+          source_match_id: null
+        };
+
+        const { error } = await window.supabaseClient
+          .from("matches")
+          .update({ bracket_meta })
+          .eq("id", match.id);
+
+        if (error) {
+          console.error("Bracket meta update failed", match.id, error);
+        }
+      });
+    });
+  }
+
+  console.log("Bracket metadata rebuilt for edition", editionId);
+}
+
+function getBracketRoundIndexByStageId(stageId) {
+  const bracketId = window.tournamentContext.selectedBracketId;
+  const rounds = window.currentStages
+    .filter(
+      s =>
+        s.stage_type === "knockout" &&
+        s.bracket_id === bracketId
+    )
+    .sort((a, b) => a.order_index - b.order_index);
+
+  return rounds.findIndex(s => s.id === stageId);
+}
+
+function renderDrawMatchCard(match, stageGraph) {
+  const card = document.createElement("div");
+  card.className = "draw-match-card";
+
+  const bracketId = window.tournamentContext.selectedBracketId;
+
+  const rounds = window.currentStages
+    .filter(
+      s => s.stage_type === "knockout" && s.bracket_id === bracketId
+    )
+    .sort((a, b) => a.order_index - b.order_index);
+
+  const currentIdx = window.tournamentContext.bracketRoundIndex || 0;
+
+  // -------------------------
+  // Helper: jump to stage ID
+  // -------------------------
+	const jumpToStage = (stageId) => {
+	  if (!stageId) return;
+
+	  const idx = rounds.findIndex(s => s.id === stageId);
+	  if (idx < 0) return;
+
+	  window.tournamentContext.bracketRoundIndex = idx;
+	  renderBracketDraw(window.currentMatches, stageGraph);
+	};
+
+  // ---------- LEFT (previous round) ----------
+  const prev = document.createElement("div");
+  prev.className = "draw-prev-slot";
+  prev.textContent = "‹‹";
+
+	const incomingStageId = getIncomingStageId(
+	  stageGraph,
+	  match.stage_id
+	);
+
+	if (incomingStageId) {
+	  prev.onclick = (e) => {
+		e.stopPropagation();
+
+		const idx = rounds.findIndex(
+		  s => s.id === incomingStageId
+		);
+
+		if (idx >= 0) {
+		  window.tournamentContext.bracketRoundIndex = idx;
+		  renderBracketDraw(window.currentMatches, stageGraph);
+		}
+	  };
+	} else {
+	  prev.classList.add("disabled");
+	  prev.style.pointerEvents = "none";
+	}
+
+  // ---------- ROW 1 ----------
+  const row1 = document.createElement("div");
+  row1.className = "draw-row";
+
+  const p1Name = document.createElement("div");
+  p1Name.className = "draw-player-name";
+  p1Name.textContent = match.player1?.name || "—";
+
+  const p1Score = document.createElement("div");
+  p1Score.className = "draw-setscore";
+  p1Score.textContent =
+    Number.isInteger(match.final_sets_player1)
+      ? match.final_sets_player1
+      : "";
+
+  const p1Adv = document.createElement("div");
+  p1Adv.className = "draw-adv-slot adv-neutral";
+  p1Adv.textContent = "››";
+
+  row1.append(p1Name, p1Score, p1Adv);
+
+  // ---------- ROW 2 ----------
+  const row2 = document.createElement("div");
+  row2.className = "draw-row";
+
+  const p2Name = document.createElement("div");
+  p2Name.className = "draw-player-name";
+  p2Name.textContent = match.player2?.name || "—";
+
+  const p2Score = document.createElement("div");
+  p2Score.className = "draw-setscore";
+  p2Score.textContent =
+    Number.isInteger(match.final_sets_player2)
+      ? match.final_sets_player2
+      : "";
+
+  const p2Adv = document.createElement("div");
+  p2Adv.className = "draw-adv-slot adv-neutral";
+  p2Adv.textContent = "››";
+
+  row2.append(p2Name, p2Score, p2Adv);
+
+  // ---------- META ----------
+  const metaCol = document.createElement("div");
+  metaCol.className = "draw-meta-col";
+
+  const date = document.createElement("div");
+  date.className = "draw-meta-date";
+  date.textContent = match.match_date
+    ? new Date(match.match_date).toLocaleString()
+    : "";
+
+  const status = document.createElement("div");
+  status.className = "draw-status-pill";
+  status.textContent =
+    window.liveSetByMatch?.[match.id]
+      ? "LIVE"
+      : (match.status || "").toUpperCase();
+
+  status.dataset.status =
+    window.liveSetByMatch?.[match.id]
+      ? "live"
+      : match.status;
+
+  metaCol.append(date, status);
+
+  const rowsWrap = document.createElement("div");
+  rowsWrap.className = "draw-rows";
+  rowsWrap.append(row1, row2);
+
+  card.append(prev, metaCol, rowsWrap);
+
+  // ---------- RESULT STATE ----------
+  const p1ScoreVal = Number(match.final_sets_player1);
+  const p2ScoreVal = Number(match.final_sets_player2);
+
+  if (
+    match.status === "finished" &&
+    Number.isFinite(p1ScoreVal) &&
+    Number.isFinite(p2ScoreVal)
+  ) {
+	const p1IsWinner = p1ScoreVal > p2ScoreVal;
+	const p2IsWinner = p2ScoreVal > p1ScoreVal;
+
+	const winnerNextStageId = getOutgoingStageId(
+	  stageGraph,
+	  match.stage_id,
+	  "winner"
+	);
+
+	const loserNextStageId = getOutgoingStageId(
+	  stageGraph,
+	  match.stage_id,
+	  "loser"
+	);
+
+	const winnerAdv = p1IsWinner ? p1Adv : p2Adv;
+	const loserAdv  = p1IsWinner ? p2Adv : p1Adv;
+
+	// WINNER PATH
+	if (winnerNextStageId) {
+	  winnerAdv.classList.remove("adv-neutral");
+	  winnerAdv.classList.add("adv-advance");
+	  winnerAdv.onclick = (e) => {
+		e.stopPropagation();
+		jumpToStage(winnerNextStageId);
+	  };
+	}
+
+	// LOSER PATH
+	if (loserNextStageId) {
+	  loserAdv.classList.remove("adv-neutral");
+	  loserAdv.classList.add("adv-advance");
+	  loserAdv.onclick = (e) => {
+		e.stopPropagation();
+		jumpToStage(loserNextStageId);
+	  };
+	}
+
+	// ELIMINATED STYLING
+	const eliminatedAdv = p1IsWinner ? p2Adv : p1Adv;
+	eliminatedAdv.classList.remove("adv-neutral");
+	eliminatedAdv.classList.add("adv-eliminate");
+
+	// Full-height arrow if only one path exists
+	if (winnerNextStageId && !loserNextStageId) {
+	  winnerAdv.classList.add("adv-full-height");
+	}
+  }
+  card.classList.add("clickable");
+
+	card.addEventListener("click", () => {
+	  window.location.hash =
+		`#/match/${match.id}/${window.currentTournamentId}`;
+	});
+
+  return card;
+}
+
 
 // -----------------------
 // OVERVIEW (SUMMARY)
@@ -2133,13 +3024,13 @@ async function renderTournamentStructure(tournamentId) {
   // Load editions + stages
 	const editions = window.currentEditions || [];
 
-	const { data: stages } = await supabase
+	const { data: stages } = await window.supabaseClient
 	  .from("stages")
 	  .select("id,name,stage_type,edition_id,order_index")
 	  .order("order_index");
 	  window.currentStages = stages || [];
 	  
-	const { data: advancementRules, error: arError } = await supabase
+	const { data: advancementRules, error: arError } = await window.supabaseClient
 	  .from("advancement_rules")
 	  .select(`
 		id,
@@ -2172,7 +3063,7 @@ async function renderTournamentStructure(tournamentId) {
 	  rulesByStage.get(r.source_stage_id).push(r);
 	});
 		  
-	const { data: groups, error: groupsError } = await supabase
+	const { data: groups, error: groupsError } = await window.supabaseClient
 	  .from("groups")
 	  .select("id, name, stage_id")
 	  .in(
@@ -2285,7 +3176,7 @@ async function loadStageAdvancementRules(tournamentId, stageId) {
 
   // 1) Ensure we know the edition for this stage
   if (!window.tournamentContext.editionId) {
-    const { data: stage, error: sErr } = await supabase
+    const { data: stage, error: sErr } = await window.supabaseClient
       .from("stages")
       .select("id, edition_id")
       .eq("id", stageId)
@@ -2303,9 +3194,9 @@ async function loadStageAdvancementRules(tournamentId, stageId) {
   // 2) Ensure we have stages for this edition (used by the dropdown)
   const edId = window.tournamentContext.editionId;
 
-  const { data: stages, error: stErr } = await supabase
+  const { data: stages, error: stErr } = await window.supabaseClient
     .from("stages")
-    .select("id, name, stage_type, edition_id, order_index")
+    .select("id, name, stage_type, bracket_id, edition_id, order_index")
     .eq("edition_id", edId)
     .order("order_index");
 
@@ -2326,7 +3217,7 @@ async function loadStageAdvancementRules(tournamentId, stageId) {
 
   showLoading("Loading advancement rules…");
 
-  const { data: stage, error: stageErr } = await supabase
+  const { data: stage, error: stageErr } = await window.supabaseClient
     .from("stages")
     .select("id,name,stage_type")
     .eq("id", stageId)
@@ -2335,7 +3226,7 @@ async function loadStageAdvancementRules(tournamentId, stageId) {
 	// ----------------------------------------
 	// LOAD *ALL* STAGES FOR TARGET SELECTION
 	// ----------------------------------------
-	const { data: allStages, error: allStagesErr } = await supabase
+	const { data: allStages, error: allStagesErr } = await window.supabaseClient
 	  .from("stages")
 	  .select("id,name,edition_id,order_index");
 
@@ -2351,7 +3242,7 @@ async function loadStageAdvancementRules(tournamentId, stageId) {
     return;
   }
 
-  const { data: rules, error: rulesErr } = await supabase
+  const { data: rules, error: rulesErr } = await window.supabaseClient
     .from("advancement_rules")
     .select(`
       id,
@@ -2480,7 +3371,7 @@ if (!rules.length) {
 
 		if (!confirm("Delete this advancement rule?")) return;
 
-		const { error } = await supabase
+		const { error } = await window.supabaseClient
 		  .from("advancement_rules")
 		  .delete()
 		  .eq("id", ruleId);
@@ -2518,31 +3409,42 @@ function openAddStageModal() {
         <button class="icon-btn modal-close">✕</button>
       </div>
 
-      <div class="modal-body">
-        <label>
-          Stage name
-          <input type="text" id="stage-name" />
-        </label>
+		<div class="modal-body">
+		  <label>
+			Stage name
+			<input type="text" id="stage-name" />
+		  </label>
 
-        <label>
-          Stage type
-          <select id="stage-type">
-            <option value="group">Group</option>
-            <option value="knockout">Knockout</option>
-          </select>
-        </label>
+		  <label>
+			Stage type
+			<select id="stage-type">
+			  <option value="group">Group</option>
+			  <option value="knockout">Knockout</option>
+			</select>
+		  </label>
 
-        <label>
-          Stage order
-          <input
-            type="number"
-            id="stage-order"
-            min="1"
-            step="1"
-            placeholder="1 = first stage"
-          />
-        </label>
-      </div>
+		  <div class="form-row" id="stage-bracket-row" style="display:none;">
+			<label>
+			  Bracket
+			  <input
+				type="text"
+				id="stage-bracket-id"
+				placeholder="e.g. main, b, plate"
+			  />
+			</label>
+		  </div>
+
+		  <label>
+			Stage order
+			<input
+			  type="number"
+			  id="stage-order"
+			  min="1"
+			  step="1"
+			  placeholder="1 = first stage"
+			/>
+		  </label>
+		</div>
 
       <div class="modal-actions">
         <button class="header-btn secondary modal-cancel">Cancel</button>
@@ -2552,6 +3454,23 @@ function openAddStageModal() {
   `;
 
   document.body.appendChild(modal);
+  
+  const stageTypeSelect = modal.querySelector("#stage-type");
+	const bracketRow = modal.querySelector("#stage-bracket-row");
+	const bracketInput = modal.querySelector("#stage-bracket-id");
+
+	function updateBracketVisibility() {
+	  if (stageTypeSelect.value === "knockout") {
+		bracketRow.style.display = "block";
+	  } else {
+		bracketRow.style.display = "none";
+		bracketInput.value = "";
+	  }
+	}
+
+	stageTypeSelect.addEventListener("change", updateBracketVisibility);
+	updateBracketVisibility();
+
 
   modal.querySelector(".modal-close").onclick =
   modal.querySelector(".modal-cancel").onclick =
@@ -2573,12 +3492,18 @@ function openAddStageModal() {
       return;
     }
 
-    const { error } = await supabase.from("stages").insert({
-      edition_id: editionId,
-      name,
-      stage_type: type,
-      order_index: order
-    });
+	const bracketId =
+	  type === "knockout"
+		? modal.querySelector("#stage-bracket-id").value.trim() || null
+		: null;
+
+	const { error } = await window.supabaseClient.from("stages").insert({
+	  edition_id: editionId,
+	  name,
+	  stage_type: type,
+	  order_index: order,
+	  bracket_id: bracketId
+	});
 
     if (error) {
       console.error(error);
@@ -2670,7 +3595,7 @@ function openAdvancementRuleModal(stageId, ruleId = null) {
   
   // EDIT MODE: load existing rule
 	if (ruleId) {
-	  supabase
+	  window.supabaseClient
 		.from("advancement_rules")
 		.select("*")
 		.eq("id", ruleId)
@@ -2710,7 +3635,7 @@ function openAdvancementRuleModal(stageId, ruleId = null) {
 (async () => {
   console.log("[adv modal] loading stages…");
 
-  const { data: stages, error } = await supabase
+  const { data: stages, error } = await window.supabaseClient
     .from("stages")
     .select("id,name,edition_id,order_index")
     .eq("edition_id", window.tournamentContext.editionId)
@@ -2814,7 +3739,7 @@ function openAdvancementRuleModal(stageId, ruleId = null) {
 
 		if (!targetStageId) return;
 
-		const { data: groups, error } = await supabase
+		const { data: groups, error } = await window.supabaseClient
 		  .from("groups")
 		  .select("id,name")
 		  .eq("stage_id", targetStageId)
@@ -2943,12 +3868,12 @@ function wireAdvancementRuleSave(stageId, modal) {
 	let query;
 
 	if (modal.dataset.ruleId) {
-	  query = supabase
+	  query = window.supabaseClient
 		.from("advancement_rules")
 		.update(payload)
 		.eq("id", modal.dataset.ruleId);
 	} else {
-	  query = supabase
+	  query = window.supabaseClient
 		.from("advancement_rules")
 		.insert(payload);
 	}
@@ -2978,7 +3903,7 @@ async function loadStagesForEdition(editionId) {
 
   container.innerHTML = `<div class="subtitle">Loading stages…</div>`;
 
-  const { data: stages, error } = await supabase
+  const { data: stages, error } = await window.supabaseClient
     .from("stages")
     .select("id,name,stage_type,order_index")
     .eq("edition_id", editionId)
@@ -3149,7 +4074,7 @@ async function loadGroupsForStage(stageId) {
   );
   if (!container) return;
 
-  const { data: groups, error } = await supabase
+  const { data: groups, error } = await window.supabaseClient
     .from("groups")
     .select("id,name")
     .eq("stage_id", stageId)
@@ -3196,7 +4121,7 @@ function wireStructureGroupAddButtons() {
       const name = prompt("Group name (e.g. Group A)");
       if (!name) return;
 
-      const { error } = await supabase
+      const { error } = await window.supabaseClient
         .from("groups")
         .insert({
           stage_id: stageId,
@@ -3222,7 +4147,7 @@ function wireGroupRename() {
 
       if (!name) return;
 
-      await supabase
+      await window.supabaseClient
         .from("groups")
         .update({ name })
         .eq("id", groupId);
@@ -3237,7 +4162,7 @@ function wireGroupDelete() {
 
       if (!confirm("Delete this group?")) return;
 
-      const { error } = await supabase
+      const { error } = await window.supabaseClient
         .from("groups")
         .delete()
         .eq("id", groupId);
@@ -3262,7 +4187,7 @@ function wireManageEditionsStages() {
             const name = prompt("Edition name:");
             if (!name) return;
 
-            await supabase.from("editions").insert({
+            await window.supabaseClient.from("editions").insert({
                 tournament_id: window.currentTournamentId,
                 name,
             });
@@ -3319,7 +4244,7 @@ function wireManageEditionsStages() {
                 }
 
                 // Only after validation do we insert
-                const { error } = await supabase.from("matches").insert({
+                const { error } = await window.supabaseClient.from("matches").insert({
                     tournament_id: window.currentTournamentId,
                     edition_id: window.tournamentContext.editionId,
                     stage_id: window.tournamentContext.stageId,
@@ -3351,7 +4276,7 @@ async function createEditionPrompt(tournamentId) {
   const name = prompt("Edition name (e.g. 2025):");
   if (!name) return;
 
-  const { error } = await supabase
+  const { error } = await window.supabaseClient
     .from("editions")
     .insert({ tournament_id: tournamentId, name: name.trim() });
 
@@ -3443,7 +4368,7 @@ function openAddGroupsOverlay(stageId) {
         order_index: i + 1
       }));
 
-      const { error } = await supabase
+      const { error } = await window.supabaseClient
         .from("groups")
         .insert(rows);
 
@@ -3461,7 +4386,7 @@ function openAddGroupsOverlay(stageId) {
 
 async function reorderStage(stageId, direction) {
     // Load current stage
-    const { data: current, error } = await supabase
+    const { data: current, error } = await window.supabaseClient
         .from("stages")
         .select("id, edition_id, order_index")
         .eq("id", stageId)
@@ -3472,14 +4397,14 @@ async function reorderStage(stageId, direction) {
     // Find neighbour
     const matcher =
         direction === "up"
-            ? supabase
+            ? window.supabaseClient
                   .from("stages")
                   .select("*")
                   .eq("edition_id", current.edition_id)
                   .lt("order_index", current.order_index)
                   .order("order_index", { ascending: false })
                   .limit(1)
-            : supabase
+            : window.supabaseClient
                   .from("stages")
                   .select("*")
                   .eq("edition_id", current.edition_id)
@@ -3494,12 +4419,12 @@ async function reorderStage(stageId, direction) {
     const other = neighbour[0];
 
     // Swap order_index values
-    await supabase
+    await window.supabaseClient
         .from("stages")
         .update({ order_index: other.order_index })
         .eq("id", current.id);
 
-    await supabase
+    await window.supabaseClient
         .from("stages")
         .update({ order_index: current.order_index })
         .eq("id", other.id);
@@ -3537,42 +4462,79 @@ async function loadTournamentMatchesManage(tournamentId) {
   // NOW the container exists
   const contentEl = document.getElementById("manage-matches-content");
 
-  if (!window.tournamentContext?.editionId || !window.tournamentContext?.stageId) {
-    contentEl.innerHTML = `
-      <div class="card">
-        <div class="error">
-          Please select an edition and stage before managing matches.
-        </div>
-      </div>
-    `;
-    return;
-  }
+	const { editionId, stageId, selectedBracketId } =
+	  window.tournamentContext || {};
+
+	if (!editionId || (!stageId && !selectedBracketId)) {
+	  contentEl.innerHTML = `
+		<div class="card">
+		  <div class="error">
+			Please select an edition and a stage or bracket before managing matches.
+		  </div>
+		</div>
+	  `;
+	  return;
+	}
 
 	contentEl.innerHTML = `
 	  <div class="subtitle">Loading match manager…</div>
 	`;
 
-  const { data: matches, error } = await supabase
-    .from("matches")
-    .select(`
-      id,
-      match_date,
-      status,
-      final_sets_player1,
-      final_sets_player2,
-      player1:player1_id ( id, name ),
-      player2:player2_id ( id, name )
-    `)
-    .eq("tournament_id", tournamentId)
-    .eq("edition_id", window.tournamentContext.editionId)
-    .eq("stage_id", window.tournamentContext.stageId)
-    .order("match_date", { ascending: true });
+	let query = window.supabaseClient
+	  .from("matches")
+	  .select(`
+		id,
+		match_date,
+		status,
+		final_sets_player1,
+		final_sets_player2,
+		bracket_meta,
+		stage_id,
+		player1:player1_id ( id, name ),
+		player2:player2_id ( id, name )
+	  `)
+	  .eq("tournament_id", tournamentId)
+	  .eq("edition_id", editionId);
+
+	if (stageId) {
+	  // Group stage or single-stage view
+	  query = query.eq("stage_id", stageId);
+	} else if (selectedBracketId) {
+	  // Bracket view → all knockout stages in this bracket
+	  const bracketStageIds = window.currentStages
+		.filter(
+		  s =>
+			s.stage_type === "knockout" &&
+			s.bracket_id === selectedBracketId
+		)
+		.map(s => s.id);
+
+	  query = query.in("stage_id", bracketStageIds);
+	}
+
+	const { data: matches, error } = await query.order(
+	  "match_date",
+	  { ascending: true }
+	);
+
 
   if (error) {
     console.error(error);
     showError("Failed to load matches.");
     return;
   }
+
+	if (selectedBracketId) {
+	  matches.sort((a, b) => {
+		const ar = a.bracket_meta?.round_index ?? 0;
+		const br = b.bracket_meta?.round_index ?? 0;
+		if (ar !== br) return ar - br;
+
+		const as = a.bracket_meta?.slot_index ?? 0;
+		const bs = b.bracket_meta?.slot_index ?? 0;
+		return as - bs;
+	  });
+	}
 
   renderManageMatches(matches || []);
 }
@@ -4022,7 +4984,7 @@ async function loadStageMatchesAndSets(stageId) {
   const gridEl = document.getElementById("bulk-set-grid");
   gridEl.textContent = "Loading…";
 
-  const { data: matches, error: matchError } = await supabase
+  const { data: matches, error: matchError } = await window.supabaseClient
     .from("matches")
     .select(`
       id,
@@ -4040,7 +5002,7 @@ async function loadStageMatchesAndSets(stageId) {
 
   const matchIds = matches.map(m => m.id);
 
-  const { data: sets } = await supabase
+  const { data: sets } = await window.supabaseClient
     .from("sets")
     .select("*")
     .in("match_id", matchIds);
@@ -4202,7 +5164,7 @@ async function saveBulkSets() {
       if (validSets.length === 0) continue;
 
       // 1️⃣ delete existing sets
-      await supabase
+      await window.supabaseClient
         .from("sets")
         .delete()
         .eq("match_id", match.matchId);
@@ -4216,10 +5178,10 @@ async function saveBulkSets() {
         winner_player_id: s.winner_player_id
       }));
 
-      await supabase.from("sets").insert(rows);
+      await window.supabaseClient.from("sets").insert(rows);
 
       // 3️⃣ update match summary
-      await supabase
+      await window.supabaseClient
         .from("matches")
         .update({
           status: "finished",
@@ -4373,7 +5335,7 @@ btn.addEventListener("click", async () => {
     const s1Val = Number(s1Input?.value || 0);
     const s2Val = Number(s2Input?.value || 0);
 
-    const { error } = await supabase.from("matches").insert({
+    const { error } = await window.supabaseClient.from("matches").insert({
       tournament_id: window.currentTournamentId,
       edition_id: window.tournamentContext.editionId,
       stage_id: window.tournamentContext.stageId,
@@ -4430,7 +5392,7 @@ btn.addEventListener("click", async () => {
 		  const s1Val = Number(s1Input?.value || 0);
 		  const s2Val = Number(s2Input?.value || 0);
 
-		  const { data, error } = await supabase
+		  const { data, error } = await window.supabaseClient
 			.from("matches")
 			.insert({
 			  tournament_id: window.currentTournamentId,
@@ -4536,7 +5498,7 @@ function wireTournamentMatchForm() {
       status: status.value
     };
 
-    const { error } = await supabase.from("matches").insert(payload);
+    const { error } = await window.supabaseClient.from("matches").insert(payload);
 
     if (error) {
       console.error(error);
@@ -4664,42 +5626,64 @@ function initBulkUpload({ tournamentId, editionId, stageId }) {
 	validateBtn.addEventListener("click", async () => {
 	  resetMessages();
 
-	  uploadBtn.disabled = true;   // ← force disabled
+	  uploadBtn.disabled = true;
 	  warningsConfirmed = false;
 
-    const csvText = csvInput.value.trim();
-    const edId = editionSel.value;
-    const stId = stageSel.value;
+	  const csvText = csvInput.value.trim();
+	  const edId = editionSel.value;
+	  const stVal = stageSel.value;
 
-	if (!csvText || !edId || !stId || stId === "") {
-	  errorsEl.textContent = "Edition, stage and CSV are required.";
-	  return;
-	}
+	  if (!csvText || !edId || !stVal) {
+		errorsEl.textContent = "Edition, stage or bracket, and CSV are required.";
+		return;
+	  }
 
-    const result = await validateBulkFixtures({
-      csvText,
-      tournamentId,
-      editionId: edId,
-      stageId: stId
-    });
+	  let result;
 
-    lastValidationResult = result;
-    warningsConfirmed = false;
-    uploadBtn.disabled = true;
+	  // --------------------------------------------------
+	  // BRACKET bulk upload
+	  // --------------------------------------------------
+	  if (stVal.startsWith("bracket:")) {
+		const bracketId = stVal.replace("bracket:", "");
 
-    if (!result.valid) {
-      renderErrors(result.errors);
-      return;
-    }
+		result = await validateBulkBracketFixtures({
+		  csvText,
+		  tournamentId,
+		  editionId: edId,
+		  bracketId
+		});
 
-    renderPreview(result.matches);
+	  // --------------------------------------------------
+	  // NORMAL stage bulk upload
+	  // --------------------------------------------------
+	  } else {
+		result = await validateBulkFixtures({
+		  csvText,
+		  tournamentId,
+		  editionId: edId,
+		  stageId: stVal
+		});
+	  }
 
-    if (result.warnings.length) {
-      renderWarnings(result.warnings);
-    } else {
-      uploadBtn.disabled = false;
-    }
-  });
+	  lastValidationResult = result;
+	  warningsConfirmed = false;
+	  uploadBtn.disabled = true;
+
+	  if (!result.valid) {
+		renderErrors(result.errors);
+		return;
+	  }
+
+	  renderPreview(result.matches);
+
+	  if (result.warnings.length) {
+		renderWarnings(result.warnings);
+	  } else {
+		uploadBtn.disabled = true;
+		uploadBtn.disabled = false;
+	  }
+	});
+
 
   // --------------------------------------------------
   // Upload (atomic)
@@ -4711,16 +5695,17 @@ function initBulkUpload({ tournamentId, editionId, stageId }) {
 	  tournament_id: m.tournament_id,
 	  edition_id: m.edition_id,
 	  stage_id: m.stage_id,
-	  group_id: m.group_id,
+	  group_id: m.group_id || null,
 	  player1_id: m.player1_id,
 	  player2_id: m.player2_id,
-	  match_date: m.match_date_utc, // rename here
+	  match_date: m.match_date || m.match_date_utc,
 	  status: "scheduled",
 	  final_sets_player1: 0,
-	  final_sets_player2: 0
+	  final_sets_player2: 0,
+	  bracket_meta: m.bracket_meta || null
 	}));
 
-    const { error } = await supabase
+    const { error } = await window.supabaseClient
       .from("matches")
       .insert(rows);
 
@@ -4911,7 +5896,7 @@ async function initGroupInitialisationTool() {
     return;
   }
 
-  const { data: groups, error: gErr } = await supabase
+  const { data: groups, error: gErr } = await window.supabaseClient
     .from("groups")
     .select("id, name")
     .eq("stage_id", stageId)
@@ -4932,7 +5917,7 @@ async function initGroupInitialisationTool() {
 	  playersTa.value = "";
 	  if (!groupId) return;
 
-	  const { data, error } = await supabase
+	  const { data, error } = await window.supabaseClient
 		.from("matches")
 		.select(`
 		  id,
@@ -5014,7 +5999,7 @@ async function syncGroupInitialisation({
     })
     .filter(p => p.name);
 
-  const { data: existing, error } = await supabase
+  const { data: existing, error } = await window.supabaseClient
     .from("matches")
     .select(`
       id,
@@ -5036,7 +6021,7 @@ async function syncGroupInitialisation({
   // Remove
   for (const [name, row] of existingByName) {
     if (!desiredNames.has(name)) {
-      await supabase.from("matches").delete().eq("id", row.id);
+      await window.supabaseClient.from("matches").delete().eq("id", row.id);
       out.removed++;
     }
   }
@@ -5049,14 +6034,14 @@ async function syncGroupInitialisation({
     }
 
     try {
-      let { data: player } = await supabase
+      let { data: player } = await window.supabaseClient
         .from("players")
         .select("id")
         .eq("name", p.name)
         .maybeSingle();
 
       if (!player) {
-        const { data: created } = await supabase
+        const { data: created } = await window.supabaseClient
           .from("players")
           .insert({
             name: p.name,
@@ -5069,7 +6054,7 @@ async function syncGroupInitialisation({
         player = created;
       }
 
-      await supabase.from("matches").insert({
+      await window.supabaseClient.from("matches").insert({
         tournament_id: tournamentId,
         edition_id: editionId,
         stage_id: stageId,
@@ -5111,7 +6096,7 @@ async function loadMatchDetail(matchId, tournamentId) {
     showLoading("Loading match…");
 
     // --- Load match ---
-    const { data: match, error: matchError } = await supabase
+    const { data: match, error: matchError } = await window.supabaseClient
         .from("matches")
         .select(`
             id,
@@ -5133,7 +6118,7 @@ async function loadMatchDetail(matchId, tournamentId) {
     }
 
     // --- Load sets ---
-    const { data: sets, error: setsError } = await supabase
+    const { data: sets, error: setsError } = await window.supabaseClient
         .from("sets")
         .select("*")
         .eq("match_id", matchId)
@@ -5146,7 +6131,7 @@ async function loadMatchDetail(matchId, tournamentId) {
     }
 
     // --- Load throws ---
-    const { data: throws, error: throwsError } = await supabase
+    const { data: throws, error: throwsError } = await window.supabaseClient
         .from("throws")
         .select("*")
         .eq("match_id", matchId)
@@ -5302,7 +6287,7 @@ async function loadMatchThrowsUpload(matchId) {
         const [setNum, throwNum, p1, p2] = line.split(",").map(v => v.trim());
 
         if (p1 !== "") {
-          await supabase.from("throws").insert({
+          await window.supabaseClient.from("throws").insert({
             match_id: matchId,
             set_number: Number(setNum),
             throw_number: Number(throwNum),
@@ -5311,7 +6296,7 @@ async function loadMatchThrowsUpload(matchId) {
         }
 
         if (p2 !== "") {
-          await supabase.from("throws").insert({
+          await window.supabaseClient.from("throws").insert({
             match_id: matchId,
             set_number: Number(setNum),
             throw_number: Number(throwNum),
@@ -5344,7 +6329,7 @@ async function loadTournamentMatchSets(matchId, tournamentId) {
 
   showLoading("Loading set scores…");
 
-  const { data: match, error } = await supabase
+  const { data: match, error } = await window.supabaseClient
     .from("matches")
     .select(`
       id,
@@ -5520,9 +6505,9 @@ updateCumulativeDisplay();
     });
 
     // Optional: you may want to delete existing sets for this match first
-    // await supabase.from("sets").delete().eq("match_id", matchId);
+    // await window.supabaseClient.from("sets").delete().eq("match_id", matchId);
 
-    const { error: insertError } = await supabase
+    const { error: insertError } = await window.supabaseClient
       .from("sets")
       .insert(rows);
 
@@ -5636,7 +6621,7 @@ async function loadFriendlyCreate() {
 
   await ensureFriendliesTournamentExists();
 
-  const { data: players, error } = await supabase
+  const { data: players, error } = await window.supabaseClient
     .from("players")
     .select("id, name, is_guest")
     .order("name", { ascending: true });
@@ -5771,7 +6756,7 @@ async function loadFriendlyCreate() {
           ? new Date(dateVal).toISOString()
           : new Date().toISOString();
 
-        const { data: inserted, error: matchErr } = await supabase
+        const { data: inserted, error: matchErr } = await window.supabaseClient
           .from("matches")
           .insert({
             tournament_id: FRIENDLIES_TOURNAMENT_ID,
@@ -5886,7 +6871,7 @@ async function updateLiveThrowsForSet(setNumber) {
     return;
   }
 
-  const { data: throws, error } = await supabase
+  const { data: throws, error } = await window.supabaseClient
     .from("throws")
     .select("id, match_id, set_number, throw_number, player_id, score, is_fault")
     .eq("match_id", window.currentMatchId)
@@ -5929,46 +6914,38 @@ window.updateLiveThrowsForSet = updateLiveThrowsForSet;
 // 23. REALTIME SUBSCRIPTIONS (SETS + THROWS)
 // =======================================================
 
-const setsChannel = supabase
+function initRealtimeSubscriptions() {
+  if (!window.supabaseClient) {
+    console.warn("[realtime] supabaseClient not ready");
+    return;
+  }
+
+  window.setsChannel = window.supabaseClient
     .channel("sets-realtime")
     .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "sets" },
-        async (payload) => {
-            if (!window.currentMatchId || !window.currentTournamentId) return;
-
-            const updated = payload.new;
-            if (!updated) return;
-            if (updated.match_id !== window.currentMatchId) return;
-
-            smoothUpdateSetRow(updated);
-        }
+      "postgres_changes",
+      { event: "*", schema: "public", table: "sets" },
+      payload => {
+        if (!window.currentMatchId) return;
+        if (payload.new?.match_id !== window.currentMatchId) return;
+        smoothUpdateSetRow(payload.new);
+      }
     )
     .subscribe();
 
-const throwsChannel = supabase
-  .channel("throws-realtime")
-  .on(
-    "postgres_changes",
-    { event: "INSERT", schema: "public", table: "throws" },
-    async (payload) => {
-      const t = payload.new;
-
-      if (!t) return;
-      if (t.match_id !== window.currentMatchId) return;
-
-      // If match page hasn't rendered yet, skip (but log it)
-      if (!document.getElementById("header-throws-p1")) {
-        console.warn("[throwsChannel] header not ready yet");
-        return;
+  window.throwsChannel = window.supabaseClient
+    .channel("throws-realtime")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "throws" },
+      payload => {
+        if (!payload.new) return;
+        if (payload.new.match_id !== window.currentMatchId) return;
+        updateLiveThrowsForSet(payload.new.set_number);
       }
-
-      updateLiveThrowsForSet(t.set_number);
-    }
-  )
-  .subscribe();
-
-
+    )
+    .subscribe();
+}
 
 // =======================================================
 // 24. SMOOTH SET ROW UPDATES (NO FULL RELOAD)
@@ -6060,7 +7037,7 @@ async function smoothUpdateSetRow(updatedSet) {
 async function updateOverallMatchScore() {
     if (!window.currentMatchId) return;
 
-    const { data: match, error } = await supabase
+    const { data: match, error } = await window.supabaseClient
         .from("matches")
         .select("final_sets_player1, final_sets_player2")
         .eq("id", window.currentMatchId)
@@ -6078,7 +7055,7 @@ async function updateOverallMatchScore() {
 }
 
 async function updateMatchListFinalScore(matchId, card) {
-    const { data: match, error } = await supabase
+    const { data: match, error } = await window.supabaseClient
         .from("matches")
         .select("final_sets_player1, final_sets_player2")
         .eq("id", matchId)
@@ -6121,7 +7098,7 @@ function applyLiveSetScoresToCards() {
 async function loadInitialLiveSetScores(matchIds) {
   if (!Array.isArray(matchIds) || matchIds.length === 0) return;
 
-  const { data, error } = await supabase
+  const { data, error } = await window.supabaseClient
     .from("sets")
     .select("match_id, score_player1, score_player2, winner_player_id")
     .in("match_id", matchIds)
@@ -6146,7 +7123,7 @@ async function loadInitialLiveSetScores(matchIds) {
 // 26. MATCH LIST LIVE SET UPDATES (REALTIME)
 // =======================================================
 
-const setsChannelMatchList = supabase
+const setsChannelMatchList = window.supabaseClient
   .channel("sets-realtime-matchlist")
   .on(
     "postgres_changes",
@@ -6215,7 +7192,7 @@ async function loadPlayerPage(playerId, tabFromRoute = "overview") {
     showLoading("Loading player…");
 
     // 1) Load player record
-    const { data: player, error: pErr } = await supabase
+    const { data: player, error: pErr } = await window.supabaseClient
         .from("players")
         .select("id, name, country, is_guest")
         .eq("id", playerId)
@@ -6227,7 +7204,7 @@ async function loadPlayerPage(playerId, tabFromRoute = "overview") {
     }
 
     // 2) Load all matches involving this player
-    const { data: matches, error: mErr } = await supabase
+    const { data: matches, error: mErr } = await window.supabaseClient
         .from("matches")
         .select(`
             id,
@@ -6707,9 +7684,10 @@ function renderDateBar(rawDates, onSelect) {
 }
 
 function setupHomeDateBar(allDates, dateToTournamentIds) {
-    renderDateBar(allDates, (selectedDate) => {
-        const date = selectedDate;
-        const allowedSet = dateToTournamentIds[date] || new Set();
+    const filteredDates = (allDates || []).filter(Boolean);
+
+    renderDateBar(filteredDates, (selectedDate) => {
+        const allowedSet = dateToTournamentIds[selectedDate] || new Set();
 
         document.querySelectorAll("[data-tid]").forEach((card) => {
             const tid = card.getAttribute("data-tid");
@@ -6719,25 +7697,31 @@ function setupHomeDateBar(allDates, dateToTournamentIds) {
     });
 }
 
+
 function setupTournamentDateBar(matches) {
     const dateBar = document.getElementById("date-bar");
     if (!dateBar) return;
 
-    // Extract yyyy-mm-dd dates from THIS tournament’s matches
+    // ONLY include playable matches
+    const playableMatches = (matches || []).filter(m =>
+        m.match_date &&
+        m.player1?.id &&
+        m.player2?.id &&
+        m.status !== "structure"
+    );
+
+    // Extract yyyy-mm-dd dates from playable matches only
     const dates = Array.from(
         new Set(
-            (matches || [])
-                .map(m => isoDateOnly(m.match_date))
-                .filter(Boolean)
+            playableMatches.map(m => isoDateOnly(m.match_date))
         )
     );
 
     renderDateBar(dates, (selectedDate) => {
-		window.tournamentContext.selectedDate = selectedDate;
-		updateDailyTabLabel(selectedDate);
-		renderTournamentDailyTab(matches, selectedDate);
-	});
-
+        window.tournamentContext.selectedDate = selectedDate;
+        updateDailyTabLabel(selectedDate);
+        renderTournamentDailyTab(matches, selectedDate);
+    });
 }
 
 function renderLoginScreen() {
@@ -6771,7 +7755,7 @@ function renderLoginScreen() {
 
     err.style.display = "none";
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { error } = await window.supabaseClient.auth.signInWithPassword({
       email,
       password
     });
@@ -6844,7 +7828,7 @@ document.addEventListener("click", async (e) => {
 
   if (!confirm("Delete this match?")) return;
 
-  const { error } = await supabase
+  const { error } = await window.supabaseClient
     .from("matches")
     .delete()
     .eq("id", mid);

@@ -42,6 +42,11 @@ let scoringCurrentSetSP2 = 0;
 let scoringCurrentThrower = "p1"; // "p1" or "p2"
 let scoringThrowHistory = []; // session-only, only for current set
 
+let scoringConsecutiveMisses = {
+  p1: 0,
+  p2: 0
+};
+
 // ===========================================================
 // INIT BUTTONS — NEW UI
 // ===========================================================
@@ -151,7 +156,7 @@ async function scoringStartSet(firstThrower) {
 
   // 1. If match is still scheduled, mark it live
   if (scoringMatch.status === "scheduled") {
-    await supabase
+    await window.supabaseClient
       .from("matches")
       .update({ status: "live" })
       .eq("id", matchId);
@@ -173,7 +178,7 @@ async function scoringStartSet(firstThrower) {
   // 3. BUTTON CHOICE IS SUPREME: push it into the DB
   const chosenThrower = firstThrower || "p1";
 
-  const { data: updatedSet, error: updErr } = await supabase
+  const { data: updatedSet, error: updErr } = await window.supabaseClient
     .from("sets")
     .update({ current_thrower: chosenThrower })
     .eq("id", setRow.id)
@@ -211,7 +216,7 @@ async function scoringEndMatch() {
 
   const matchId = scoringMatch.matchId;
 
-  await supabase
+  await window.supabaseClient
     .from("matches")
     .update({ status: "finished" })
     .eq("id", matchId);
@@ -334,8 +339,7 @@ function resetScoringStateForMatch(match, sets) {
   scP1Sets.textContent = scoringMatch.setsP1;
   scP2Sets.textContent = scoringMatch.setsP2;
 
-  scP1SP.textContent = 0; // overall SP can be added later
-  scP2SP.textContent = 0;
+	recalcMatchSmallPoints(match.id);
 
   scP1SetSP.textContent = scoringCurrentSetSP1;
   scP2SetSP.textContent = scoringCurrentSetSP2;
@@ -360,7 +364,7 @@ if (scoringCurrentThrower === "p1" || scoringCurrentThrower === "p2") {
 async function scoringAddScore(score, opts = {}) {
   if (!scoringMatch) return;
 
-  // Make sure we actually have a set row + set id
+  // Ensure set exists
   if (!scoringCurrentSetId) {
     const { data: setRow, error } = await dbGetOrCreateSet(
       scoringMatch.matchId,
@@ -374,11 +378,14 @@ async function scoringAddScore(score, opts = {}) {
     scoringCurrentSetId = setRow.id;
   }
 
-  const isMiss = opts.isMiss || score === 0;
+  const isMiss  = opts.isMiss || score === 0;
   const isFault = opts.isFault || false;
-  const isP1 = scoringCurrentThrower === "p1";
+  const isP1    = scoringCurrentThrower === "p1";
+  const currentPlayer = isP1 ? "p1" : "p2";
 
-  // ===== APPLY LOCAL SCORING =====
+  // -------------------------------------------------------
+  // APPLY SCORING
+  // -------------------------------------------------------
   if (isP1) {
     if (isMiss) {
       if (isFault && scoringCurrentSetSP1 >= 37) scoringCurrentSetSP1 = 25;
@@ -395,50 +402,108 @@ async function scoringAddScore(score, opts = {}) {
     }
   }
 
-  // ===== SAVE THROW LOCALLY FOR immediate per-set undo (optional) =====
+  // -------------------------------------------------------
+  // TRACK MISSES (3 MISS RULE)
+  // -------------------------------------------------------
+  if (isMiss) {
+    scoringConsecutiveMisses[currentPlayer]++;
+  } else {
+    scoringConsecutiveMisses[currentPlayer] = 0;
+  }
+
+  // -------------------------------------------------------
+  // SAVE THROW (DB)
+  // -------------------------------------------------------
   scoringThrowHistory.push({
-    player: isP1 ? "p1" : "p2",
+    player: currentPlayer,
     score,
     isMiss,
     isFault
   });
 
-  // ===== DETERMINE THROW NUMBER FROM DB (robust to reloads/undos) =====
   let throwNumber = scoringThrowHistory.length;
   try {
-    const { data: existingThrows } = await supabase
+    const { data: existingThrows } = await window.supabaseClient
       .from("throws")
       .select("id")
       .eq("match_id", scoringMatch.matchId)
       .eq("set_number", scoringMatch.currentSetNumber);
 
-    const count = existingThrows ? existingThrows.length : 0;
-    throwNumber = count + 1;
-  } catch (e) {
-    console.warn("Failed to count existing throws, falling back to local history length.");
-  }
+    throwNumber = (existingThrows?.length || 0) + 1;
+  } catch {}
 
-  const playerId = isP1 ? scoringMatch.p1Id : scoringMatch.p2Id;
-
-  // ===== INSERT THROW INTO DB =====
   await dbInsertThrow({
     matchId: scoringMatch.matchId,
     setId: scoringCurrentSetId,
     setNumber: scoringMatch.currentSetNumber,
     throwNumber,
-    playerId,
+    playerId: isP1 ? scoringMatch.p1Id : scoringMatch.p2Id,
     score,
     isMiss,
     isFault
   });
 
-  // ===== UPDATE LOCAL UI =====
-  scP1SetSP.textContent = scoringCurrentSetSP1;
-  scP2SetSP.textContent = scoringCurrentSetSP2;
+  // -------------------------------------------------------
+  // THREE CONSECUTIVE MISSES → AUTOMATIC 50–0
+  // -------------------------------------------------------
+  if (scoringConsecutiveMisses[currentPlayer] === 3) {
+    const loserIsP1 = currentPlayer === "p1";
 
-  // ===============================================================
-  // CHECK FOR SET WIN (50 POINT SET)
-  // ===============================================================
+    scoringCurrentSetSP1 = loserIsP1 ? 0 : 50;
+    scoringCurrentSetSP2 = loserIsP1 ? 50 : 0;
+
+    const winnerId = loserIsP1
+      ? scoringMatch.p2Id
+      : scoringMatch.p1Id;
+
+    await window.supabaseClient
+      .from("sets")
+      .update({
+        score_player1: scoringCurrentSetSP1,
+        score_player2: scoringCurrentSetSP2,
+        winner_player_id: winnerId
+      })
+      .eq("id", scoringCurrentSetId);
+	  
+	  await recalcMatchSmallPoints(scoringMatch.matchId);
+
+    if (winnerId === scoringMatch.p1Id) {
+      scoringMatch.setsP1++;
+    } else {
+      scoringMatch.setsP2++;
+    }
+
+    await window.supabaseClient
+      .from("matches")
+      .update({
+        final_sets_player1: scoringMatch.setsP1,
+        final_sets_player2: scoringMatch.setsP2
+      })
+      .eq("id", scoringMatch.matchId);
+
+    scP1SetSP.textContent = scoringCurrentSetSP1;
+    scP2SetSP.textContent = scoringCurrentSetSP2;
+
+    if (typeof updateOverallMatchScore === "function") {
+      await updateOverallMatchScore();
+    }
+
+    // Reset for next set
+    scoringMatch.currentSetNumber++;
+    scoringCurrentSetId = null;
+    scoringCurrentSetSP1 = 0;
+    scoringCurrentSetSP2 = 0;
+    scoringThrowHistory = [];
+    scoringConsecutiveMisses = { p1: 0, p2: 0 };
+    scoringCurrentThrower = null;
+
+    showStartSetOverlay();
+    return;
+  }
+
+  // -------------------------------------------------------
+  // NORMAL SET WIN (50 EXACT)
+  // -------------------------------------------------------
   let winningPlayer = null;
 
   if (scoringCurrentSetSP1 === 50 && scoringCurrentSetSP2 < 50) {
@@ -449,8 +514,7 @@ async function scoringAddScore(score, opts = {}) {
   }
 
   if (winningPlayer) {
-    // Mark set winner
-    await supabase
+    await window.supabaseClient
       .from("sets")
       .update({
         winner_player_id: winningPlayer,
@@ -458,15 +522,16 @@ async function scoringAddScore(score, opts = {}) {
         score_player2: scoringCurrentSetSP2
       })
       .eq("id", scoringCurrentSetId);
+	  
+	  await recalcMatchSmallPoints(scoringMatch.matchId);
 
-    // Update match set scores
     if (winningPlayer === scoringMatch.p1Id) {
       scoringMatch.setsP1++;
     } else {
       scoringMatch.setsP2++;
     }
 
-    await supabase
+    await window.supabaseClient
       .from("matches")
       .update({
         final_sets_player1: scoringMatch.setsP1,
@@ -474,35 +539,35 @@ async function scoringAddScore(score, opts = {}) {
       })
       .eq("id", scoringMatch.matchId);
 
-    // Refresh header score in match detail
     if (typeof updateOverallMatchScore === "function") {
       await updateOverallMatchScore();
     }
 
-// === PREPARE FOR NEXT SET (BUT DO NOT START IT YET) =========
-scoringMatch.currentSetNumber++;
-scoringCurrentSetId  = null;
-scoringCurrentSetSP1 = 0;
-scoringCurrentSetSP2 = 0;
-scoringThrowHistory  = [];
-// Do NOT pre-pick the next thrower – wait for the buttons
-scoringCurrentThrower = null;
+    scoringMatch.currentSetNumber++;
+    scoringCurrentSetId = null;
+    scoringCurrentSetSP1 = 0;
+    scoringCurrentSetSP2 = 0;
+    scoringThrowHistory = [];
+    scoringConsecutiveMisses = { p1: 0, p2: 0 };
+    scoringCurrentThrower = null;
 
-scP1SetSP.textContent = "0";
-scP2SetSP.textContent = "0";
-scCurrentThrowerLabel.textContent = "–";
+    scP1SetSP.textContent = "0";
+    scP2SetSP.textContent = "0";
+    scCurrentThrowerLabel.textContent = "–";
 
-showStartSetOverlay();
-return; // Do NOT switch thrower after set win
+    showStartSetOverlay();
+    return;
   }
 
-  // ===== NORMAL THROWER SWITCH =====
+  // -------------------------------------------------------
+  // SWITCH THROWER
+  // -------------------------------------------------------
   scoringCurrentThrower = isP1 ? "p2" : "p1";
   scCurrentThrowerLabel.textContent =
-    (scoringCurrentThrower === "p1" ? scoringMatch.p1Name : scoringMatch.p2Name) +
-    " to throw";
+    (scoringCurrentThrower === "p1"
+      ? scoringMatch.p1Name
+      : scoringMatch.p2Name) + " to throw";
 
-  // ===== SAVE SET SCORE + THROWER TO DB =====
   await dbUpdateLiveSetScore({
     matchId: scoringMatch.matchId,
     setNumber: scoringMatch.currentSetNumber,
@@ -511,10 +576,25 @@ return; // Do NOT switch thrower after set win
     thrower: scoringCurrentThrower
   });
 
-  // ===== REFRESH MATCH DETAIL ONLY IF CONSOLE IS CLOSED =====
   if (scoringConsole.style.display === "none") {
     loadMatchDetail(scoringMatch.matchId, scoringMatch.tournamentId);
   }
+}
+
+async function recalcMatchSmallPoints(matchId) {
+  const { data: sets, error } = await window.supabaseClient
+    .from("sets")
+    .select("score_player1, score_player2, winner_player_id")
+    .eq("match_id", matchId)
+    .not("winner_player_id", "is", null);
+
+  if (error || !sets) return;
+
+  const sp1 = sets.reduce((t, s) => t + (s.score_player1 || 0), 0);
+  const sp2 = sets.reduce((t, s) => t + (s.score_player2 || 0), 0);
+
+  scP1SP.textContent = sp1;
+  scP2SP.textContent = sp2;
 }
 
 // ===========================================================
@@ -527,7 +607,7 @@ async function scoringUndo() {
   const matchId = scoringMatch.matchId;
 
   // 1. Find the last throw in this match (any set)
-  const { data: lastThrow, error: lastErr } = await supabase
+  const { data: lastThrow, error: lastErr } = await window.supabaseClient
     .from("throws")
     .select("*")
     .eq("match_id", matchId)
@@ -554,7 +634,7 @@ async function scoringUndo() {
   }
 
   // 2. Get the set row to know previous winner (for match correction)
-  const { data: setRow, error: setErr } = await supabase
+  const { data: setRow, error: setErr } = await window.supabaseClient
     .from("sets")
     .select("*")
     .eq("id", setId)
@@ -568,7 +648,7 @@ async function scoringUndo() {
   const prevWinner = setRow.winner_player_id;
 
   // 3. Delete that throw
-  const { error: delErr } = await supabase
+  const { error: delErr } = await window.supabaseClient
     .from("throws")
     .delete()
     .eq("id", lastThrow.id);
@@ -579,7 +659,7 @@ async function scoringUndo() {
   }
 
   // 4. Load remaining throws for this set
-  const { data: remainingThrows, error: remErr } = await supabase
+  const { data: remainingThrows, error: remErr } = await window.supabaseClient
     .from("throws")
     .select("*")
     .eq("match_id", matchId)
@@ -624,7 +704,7 @@ async function scoringUndo() {
   }
 
   // 7. Update set row
-  const { error: updSetErr } = await supabase
+  const { error: updSetErr } = await window.supabaseClient
     .from("sets")
     .update({
       score_player1: newSP1,
@@ -640,7 +720,7 @@ async function scoringUndo() {
 
   // 8. If winner changed, adjust match final set scores
   if (prevWinner !== newWinnerId) {
-    const { data: matchRow, error: mErr } = await supabase
+    const { data: matchRow, error: mErr } = await window.supabaseClient
       .from("matches")
       .select("id, player1_id, player2_id, final_sets_player1, final_sets_player2")
       .eq("id", matchId)
@@ -661,13 +741,15 @@ async function scoringUndo() {
       if (newWinnerId === mp1) setsP1++;
       if (newWinnerId === mp2) setsP2++;
 
-      await supabase
+      await window.supabaseClient
         .from("matches")
         .update({
           final_sets_player1: setsP1,
           final_sets_player2: setsP2
         })
         .eq("id", matchId);
+		
+		await recalcMatchSmallPoints(scoringMatch.matchId);
 
       // also update local scoringMatch
       scoringMatch.setsP1 = setsP1;

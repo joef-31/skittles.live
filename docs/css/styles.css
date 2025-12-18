@@ -899,6 +899,204 @@ input[type="number"] {
   font-weight: 600;
 }
 
+/* Bracket-style match card */
+
+
+.draw-stage-column {
+  width: 100%;
+}
+
+.draw-match-card {
+  width: 100%;
+  background: var(--card-bg);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 8px;
+
+  display: grid;
+  grid-template-columns: 26px 72px 1fr; /* << | meta | players */
+  grid-template-rows: auto auto;        /* player rows only */
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+/* Left arrow spans the full card height */
+.draw-prev-slot {
+  grid-column: 1;
+  grid-row: 1 / span 2;         /* spans row1 + row2 + meta */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  color: var(--text-muted);
+  background: #a7b4d80f;
+  opacity: 0.5;
+  user-select: none;
+
+  border-right: 1px solid rgba(255,255,255,0.10);
+}
+
+.draw-stage-matches {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;   /* ← centres cards horizontally */
+  gap: 10px;
+}
+
+/* Two main rows */
+
+.draw-row {
+  display: grid;
+  grid-template-columns: 1fr 28px 48px;
+  align-items: center;
+  column-gap: 6px;
+}
+
+.draw-round-nav button {
+  background: rgba(255,255,255,0.08);
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.draw-round-nav button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Player names: identical to match cards */
+
+.draw-player-name {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Set score: identical prominence */
+
+.draw-setscore {
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: right;
+  padding-right: 3px;
+}
+
+/* Advancement slot (the |__>__| area) */
+
+/* Draw advancement slot (neutral base) */
+.draw-adv-slot {
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 2px 6px;
+  border-left: 1px solid rgba(255,255,255,0.12);
+  background: transparent;
+  user-select: none;
+  color: inherit;       /* IMPORTANT */
+}
+
+/* Meta column */
+
+.draw-meta-col {
+  grid-column: 2;
+  grid-row: 1 / span 2;   /* spans both player rows */
+
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+  gap: 4px;
+
+  font-size: 0.66rem;
+  color: var(--text-muted);
+
+  max-width: 72px;
+}
+
+.draw-meta-date {
+  line-height: 1.2;
+  white-space: normal;   /* explicitly allow wrapping */
+}
+
+/* State handling */
+
+.draw-row.is-potential .draw-adv-slot {
+  opacity: 0.25;
+}
+
+.draw-row.is-winner .draw-adv-slot {
+  opacity: 1;
+}
+
+.draw-row.is-loser .draw-adv-slot {
+  opacity: 1;
+}
+
+/* Positive advancement (blue) */
+.draw-adv-slot.adv-advance {
+  color: #1e88e5;
+  background: #1e88e50f;
+  opacity: 1;
+  cursor: pointer;
+}
+
+/* Negative advancement (red) */
+.draw-adv-slot.adv-eliminate {
+  color: #e53935;
+  background: #e539350f;
+  opacity: 0.85;
+  cursor: pointer;
+}
+
+/* Neutral / pending */
+.draw-adv-slot.adv-neutral {
+  color: #9e9e9e;
+  background: #9e9e9e0f;
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Layer priority (optional, but consistent) */
+.draw-adv-slot.adv-layer-2 { opacity: 0.7; }
+.draw-adv-slot.adv-layer-3 { opacity: 0.45; }
+.draw-adv-slot.adv-layer-4 { opacity: 0.25; }
+
+/* Status pill – identical language to match cards */
+
+.draw-status-pill {
+  padding: 1px 2px;
+  border-radius: 999px;
+
+  font-size: 0.55rem;
+  font-weight: 600;
+  line-height: 1.1;
+
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
+/* Finished */
+
+.draw-status-pill[data-status="finished"] {
+  color: #ff6b6b; /* same red you already use */
+}
+
+/* Live */
+
+.draw-status-pill[data-status="live"] {
+  color: var(--live-set-text);
+  border-color: var(--live-set-border);
+}
+
+/* Scheduled (optional, if you want parity) */
+
+.draw-status-pill[data-status="scheduled"] {
+  color: var(--text-muted);
+}
+
+
 /* Top match header */
 
 .top-card {
@@ -1195,6 +1393,45 @@ input[type="number"] {
 .standings-table th {
   color: var(--text-muted);
   font-weight: 600;
+}
+
+#draw-view {
+  overflow-x: auto;
+  padding: 12px;
+}
+
+.draw-scroll {
+  display: flex;
+  gap: 16px;
+}
+
+.draw-stage-column {
+  min-width: 220px;
+  background: var(--card-bg);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.draw-stage-header {
+  font-weight: 600;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.draw-match-card {
+  background: var(--card-inner-bg);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.draw-player {
+  font-size: 0.9rem;
+}
+
+.draw-empty {
+  opacity: 0.5;
+  font-style: italic;
+  text-align: center;
 }
 
 /* Scoring console */
@@ -1790,10 +2027,10 @@ input[type="number"] {
     padding: 10px;
   } 
   .pill {
-    min-width: 32px;
-    max-width: 60px;
-    padding: 0 4px;
-    font-size: 0.55rem;
+	min-width: 32px;
+    max-width: 80px;
+    padding: 0 6px;
+    font-size: 0.70rem;
     letter-spacing: 0.04em;
   }
   .live-throwstrip-row {

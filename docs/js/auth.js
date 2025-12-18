@@ -80,7 +80,7 @@ async function initAuth() {
   const {
     data: { user },
     error
-  } = await supabase.auth.getUser();
+  } = await window.supabaseClient.auth.getUser();
 
   if (error) {
     console.error("[auth] getUser failed", error);
@@ -143,7 +143,7 @@ function openLoginModal() {
 
     errEl.textContent = "";
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { error } = await window.supabaseClient.auth.signInWithPassword({
       email,
       password
     });
@@ -205,7 +205,7 @@ function openLogoutConfirmModal() {
 window.openLogoutConfirmModal = openLogoutConfirmModal;
 
 async function performLogout() {
-  const { error } = await supabase.auth.signOut();
+  const { error } = await window.supabaseClient.auth.signOut();
 
   if (error) {
     console.error("[auth] logout failed", error);

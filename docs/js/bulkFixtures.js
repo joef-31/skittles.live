@@ -111,15 +111,15 @@ async function validateBulkFixtures({
   // -------------------------
   const [{ data: players }, { data: stage }, { data: groups }, { data: existingMatches }] =
     await Promise.all([
-      supabase.from("players").select("id,name"),
-      supabase
+      window.supabaseClient.from("players").select("id,name"),
+      window.supabaseClient
 		  .from("stages")
 		  .select("id, stage_type, edition_id")
 		  .eq("id", stageId)
 		  .eq("edition_id", editionId)
 		  .maybeSingle(),
-      supabase.from("groups").select("id,name").eq("stage_id", stageId),
-      supabase
+      window.supabaseClient.from("groups").select("id,name").eq("stage_id", stageId),
+      window.supabaseClient
         .from("matches")
         .select("player1_id,player2_id,match_date")
         .eq("tournament_id", tournamentId)
@@ -148,14 +148,15 @@ async function validateBulkFixtures({
   // Row-by-row validation
   // -------------------------
   for (const row of rows) {
-    const {
-      rowNumber,
-      dateStr,
-      timeStr,
-      player1Name,
-      player2Name,
-      roundLabel
-    } = row;
+	const {
+	  rowNumber,
+	  dateStr,
+	  timeStr,
+	  player1Name,
+	  player2Name,
+	  roundLabel,
+	  bracketMeta
+	} = row;
 
     // Basic shape checks
     if (!dateStr || !timeStr || !player1Name || !player2Name || !roundLabel) {
@@ -264,27 +265,57 @@ async function validateBulkFixtures({
 	  });
 	}
 	
-	console.log(
-	  "DUP CHECK",
-	  player1Name,
-	  player2Name,
-	  dup
-	);
+	let parsedBracketMeta = null;
 
-    result.matches.push({
-		tournament_id: tournamentId,
-		edition_id: editionId,
-		stage_id: stageId,
-		group_id: groupId,
-		group_name: roundName,
-		round_label: roundName,
-		player1_id: p1.id,
-		player2_id: p2.id,
-		player1_name: player1Name,
-		player2_name: player2Name,
-		match_date_utc: utcDate,
-		status: "scheduled"
-    });
+	if (bracketMeta) {
+	  if (stage.stage_type !== "knockout") {
+		result.errors.push({
+		  row: rowNumber,
+		  field: "bracket_meta",
+		  message: "bracket_meta is only allowed for knockout stages"
+		});
+		continue;
+	  }
+
+	  try {
+		parsedBracketMeta = JSON.parse(bracketMeta);
+
+		if (!parsedBracketMeta.bracket_id) {
+		  throw new Error("Missing bracket_id");
+		}
+
+		if (!Number.isInteger(parsedBracketMeta.round_index)) {
+		  throw new Error("round_index must be an integer");
+		}
+
+		if (!Number.isInteger(parsedBracketMeta.slot_index)) {
+		  throw new Error("slot_index must be an integer");
+		}
+	  } catch (e) {
+		result.errors.push({
+		  row: rowNumber,
+		  field: "bracket_meta",
+		  message: `Invalid bracket_meta JSON: ${e.message}`
+		});
+		continue;
+	  }
+	}
+
+	result.matches.push({
+	  tournament_id: tournamentId,
+	  edition_id: editionId,
+	  stage_id: stageId,
+	  group_id: groupId,
+	  group_name: roundName,
+	  round_label: roundName,
+	  player1_id: p1.id,
+	  player2_id: p2.id,
+	  player1_name: player1Name,
+	  player2_name: player2Name,
+	  match_date_utc: utcDate,
+	  status: "scheduled",
+	  bracket_meta: parsedBracketMeta // ← NEW
+	});
   }
 
   if (result.errors.length === 0) {
@@ -300,6 +331,188 @@ async function validateBulkFixtures({
 
   return result;
 }
+
+async function validateBulkBracketFixtures({
+  csvText,
+  tournamentId,
+  editionId,
+  bracketId
+}) {
+  const result = {
+    valid: false,
+    errors: [],
+    warnings: [],
+    matches: []
+  };
+
+  // -------------------------
+  // Parse CSV
+  // -------------------------
+  const parsed = parseCsv(csvText);
+  if (parsed.error) {
+    result.errors.push({
+      row: null,
+      field: "csv",
+      message: parsed.error
+    });
+    return result;
+  }
+
+  const rows = parsed.rows;
+
+  // -------------------------
+  // Load reference data
+  // -------------------------
+  const [
+    { data: players },
+    { data: stages }
+  ] = await Promise.all([
+    window.supabaseClient.from("players").select("id,name"),
+    window.supabaseClient
+      .from("stages")
+      .select("id,name,order_index,bracket_id,stage_type")
+      .eq("edition_id", editionId)
+      .eq("stage_type", "knockout")
+      .eq("bracket_id", bracketId)
+  ]);
+
+  if (!stages?.length) {
+    result.errors.push({
+      row: null,
+      field: "bracket",
+      message: "No knockout stages found for this bracket"
+    });
+    return result;
+  }
+
+  const playerByName = new Map(players.map(p => [p.name, p]));
+  const stageByName  = new Map(stages.map(s => [s.name, s]));
+
+  // -------------------------
+  // Validate rows
+  // -------------------------
+  for (const row of rows) {
+    const {
+      rowNumber,
+      dateStr,
+      timeStr,
+      round,
+      slot,
+      player1,
+      player2
+    } = row;
+
+    if (!dateStr || !timeStr || !round || slot === undefined || !player1 || !player2) {
+      result.errors.push({
+        row: rowNumber,
+        field: "row",
+        message: "date, time, round, slot, player1, player2 are required"
+      });
+      continue;
+    }
+
+    if (!isValidDate(dateStr)) {
+      result.errors.push({
+        row: rowNumber,
+        field: "date",
+        message: "Invalid date format (YYYY-MM-DD)"
+      });
+      continue;
+    }
+
+    if (!isValidTime(timeStr)) {
+      result.errors.push({
+        row: rowNumber,
+        field: "time",
+        message: "Invalid time format (HH:MM)"
+      });
+      continue;
+    }
+
+    const stage = stageByName.get(round.trim());
+    if (!stage) {
+      result.errors.push({
+        row: rowNumber,
+        field: "round",
+        message: `Unknown round: "${round}"`
+      });
+      continue;
+    }
+
+    const p1 = playerByName.get(player1);
+    const p2 = playerByName.get(player2);
+
+    if (!p1 || !p2) {
+      result.errors.push({
+        row: rowNumber,
+        field: "players",
+        message: "Unknown player name"
+      });
+      continue;
+    }
+
+    if (p1.id === p2.id) {
+      result.errors.push({
+        row: rowNumber,
+        field: "players",
+        message: "Player cannot play themselves"
+      });
+      continue;
+    }
+
+    const matchDate = buildUtcTimestamp(dateStr, timeStr);
+    if (!matchDate) {
+      result.errors.push({
+        row: rowNumber,
+        field: "time",
+        message: "Invalid date/time combination"
+      });
+      continue;
+    }
+
+    result.matches.push({
+      tournament_id: tournamentId,
+      edition_id: editionId,
+      stage_id: stage.id,
+      player1_id: p1.id,
+      player2_id: p2.id,
+      match_date: matchDate,
+      status: "scheduled",
+
+      bracket_meta: {
+        bracket_id: bracketId,
+        round_index: stage.order_index,
+        slot_index: Number(slot),
+        path: null,
+        source_match_id: null
+      }
+    });
+  }
+
+  if (result.errors.length === 0) {
+    result.valid = true;
+  } else {
+    result.matches = [];
+  }
+
+  return result;
+}
+
+async function persistBulkBracketFixtures(matches) {
+  if (!matches?.length) return;
+
+  const { error } = await window.supabaseClient
+    .from("matches")
+    .insert(matches);
+
+  if (error) {
+    console.error("Failed to insert bracket fixtures", error);
+    throw error;
+  }
+}
+
+
+
 
 // -----------------------------------------------------------
 // Expose
