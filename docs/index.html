@@ -2,121 +2,118 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>molkky.live</title>
-
-  <!-- Supabase JS v2 -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
-  <!-- External stylesheet -->
-  <link rel="stylesheet" href="css/styles.css">
+  <title>skittles.live</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="src/styles/app.css" />
 </head>
 
 <body>
+
   <div id="app-shell">
+
+    <!-- HEADER -->
 		<div id="app-header">
 		  <a href="index.html">
 			<img src="logo.png" width="200px">
 		  </a>
 
-		  <div class="header-tools">
-			<div id="auth-controls"></div>
-		  </div>
+		<div class="header-tools">
+		  <div id="header-primary-tools"></div>
+		  <div id="header-admin-tools"></div>
+		  <div id="auth-controls"></div>
+		</div>
 		</div>
 
-<div id="backBtn">⬅ Back</div>
+    <!-- BACK BUTTON -->
+    <div id="back-btn" style="display:none">⬅ Back</div>
 
-<div id="date-bar-wrapper">
-  <div id="date-bar"></div>
-</div>
-
-<div id="scoring-console" class="card">
-  
-  <!-- HEADER -->
-  <div id="scoring-console-header">
-    <div class="label">Scoring console</div>
-    <button id="scoring-close-btn">Close ✕</button>
-  </div>
-
-  <!-- CURRENT THROW -->
-  <div class="scoring-current-thrower">
-    Current throw: <span id="scoring-current-thrower-label">–</span>
-  </div>
-
-  <!-- START MATCH OVERLAY (kept optional if you're using it) -->
-  <div id="start-match-overlay" class="start-match-overlay" style="display:none;">
-    <div class="start-match-box">
-      <div class="start-match-title">Match not started</div>
-      <div class="start-match-text">
-        This match is still scheduled. Press <strong>Start match</strong> to begin Set 1.
-      </div>
-      <button id="start-match-btn" class="start-match-btn">Start match</button>
+    <!-- DATE BAR -->
+    <div id="date-bar-wrapper">
+      <div id="date-bar"></div>
     </div>
-  </div>
+	
+	<div id="scoring-console" style="display:none"></div>
 
-  <div id="start-set-overlay" class="scoring-overlay" style="display:none;">
-  <div class="scoring-overlay-panel">
-    <div id="start-set-title" class="scoring-overlay-title">Start match</div>
-    <div id="start-set-sub" class="scoring-overlay-sub">Who throws first?</div>
-    <div class="scoring-overlay-buttons">
-      <button id="start-set-with-p1" class="score-btn big-btn fullwidth"></button>
-      <button id="start-set-with-p2" class="score-btn big-btn fullwidth"></button>
-    </div>
-    <button id="end-match-btn" class="score-btn danger big-btn fullwidth" style="margin-top:6px;">
-      End match
-    </button>
-  </div>
-  </div>
-
-
-  <!-- PLAYER INFO -->
-  <div class="scoring-players">
-    <div class="scoring-player">
-      <div class="scoring-name" id="scoring-p1-name">Player 1</div>
-      <div class="scoring-scoreline">
-        Sets: <span id="scoring-p1-sets">0</span> |
-        Match SP: <span id="scoring-p1-sp">0</span>
-      </div>
-      <div class="scoring-current-set">
-        Points: <span id="scoring-p1-setsp">0</span>
-      </div>
-    </div>
-
-    <div class="scoring-player">
-      <div class="scoring-name" id="scoring-p2-name">Player 2</div>
-      <div class="scoring-scoreline">
-        Sets: <span id="scoring-p2-sets">0</span> |
-        Match SP: <span id="scoring-p2-sp">0</span>
-      </div>
-      <div class="scoring-current-set">
-        Points: <span id="scoring-p2-setsp">0</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- BUTTONS -->
- <div class="scoring-buttons-grid" id="scoring-buttons"></div>
- <div id="scoring-miss-container"></div>
-
-</div>
-
-
+    <!-- MAIN CONTENT -->
     <div id="content"></div>
+
   </div>
+
+  <!-- BOTTOM BAR (will be re-rendered dynamically) -->
+  <div id="bottom-bar"></div>
   
-	<div id="bottom-bar">
-	  <div class="bottom-bar-inner"></div>
+	<!-- LOGIN MODAL -->
+	<div id="login-modal" class="modal-overlay" style="display:none;">
+	  <div class="modal-card">
+
+		<div class="modal-header">
+		  <div class="modal-title">Log in</div>
+		</div>
+
+		<div class="modal-body">
+		  <label>
+			Email
+			<input type="email" id="login-email" />
+		  </label>
+
+		  <label>
+			Password
+			<input type="password" id="login-password" />
+		  </label>
+
+		  <div id="login-error" class="error" style="display:none;"></div>
+		</div>
+
+		<div class="modal-actions">
+		  <button id="login-submit" class="header-btn">Log in</button>
+		  <button id="login-cancel" class="header-btn secondary">Cancel</button>
+		</div>
+
+	  </div>
 	</div>
-</div>
+
+  <!-- scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script defer src="src/core/state.js"></script>
+
+  <!-- UI -->
+  <script defer src="src/features/auth/auth.js"></script>
+  <script defer src="src/features/auth/modals.js"></script>
+  <script defer src="src/features/auth/roles.js"></script>
+  <script defer src="src/features/auth/permissions.js"></script>
+  <script defer src="src/ui/layout.js"></script>
+  <script defer src="src/ui/datebar.js"></script>
+  <script defer src="src/ui/forms.js"></script>
+
+  <!-- Utils -->
+  <script defer src="src/utils/dom.js"></script>
+  <script defer src="src/utils/date.js"></script>
+
+  <!-- Data -->
+  <script defer src="src/db/supabase.js"></script>
+  <script defer src="src/db/db.js"></script>
+
+  <!-- Features -->
+  <script defer src="src/features/tournament/bulkFixtures.js"></script>
+  <script defer src="src/features/tournament/tournament.js"></script>
+  <script defer src="src/features/leagues/leagues.js"></script>
+  <script defer src="src/features/match/throws.js"></script>
+  <script defer src="src/features/match/sets.js"></script>
+  <script defer src="src/features/match/match.js"></script>
+  <script defer src="src/features/scoring/scoring.js"></script>
+  <script defer src="src/features/scoring/console.js"></script>
+  <script defer src="src/features/player/player.js"></script>
+  <!-- App + Router -->
+  <script defer src="src/core/router.js"></script>
+  <script defer src="src/features/auth/routes.js"></script>
+	<script defer src="src/features/tournament/routes.js"></script>
+	<script defer src="src/features/leagues/routes.js"></script>
+	<script defer src="src/features/match/routes.js"></script>
+	<script defer src="src/features/player/routes.js"></script>
+  <script defer src="src/app.js"></script>
 
 
-
-  <!-- JS modules -->
-	<script src="js/db.js"></script>
-	<script src="js/bulkFixtures.js"></script>
-	<script src="js/auth.js"></script>
-	<script src="js/scoring.js"></script>
-	<script src="js/ui.js"></script>
-	<script src="js/app2.js"></script>
 </body>
+
 </html>
