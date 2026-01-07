@@ -33,20 +33,9 @@ window.openLoginModal = function () {
 
     modal.style.display = "none";
     await initAuth();
-    renderAuthControls();
   };
 
   document.getElementById("login-cancel").onclick = () => {
     modal.style.display = "none";
   };
-};
-
-
-window.openLogoutConfirmModal = function () {
-  if (confirm("Log out?")) {
-    if (window.supabaseClient) {
-      window.supabaseClient.auth.signOut();
-    }
-    location.reload();
-  }
 };

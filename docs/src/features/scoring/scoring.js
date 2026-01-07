@@ -48,11 +48,12 @@ App.Features.Scoring.openConsole = async function () {
   
     window.isScoringConsoleOpen = true;
 
-  const canScore =
-    window.auth?.can?.("score_match", {
-      type: "match",
-      id: scoringMatch.matchId
-    }) === true;
+	const canScore =
+	  window.App?.Auth?.canScoreMatch?.({
+		id: scoringMatch.matchId,
+		player1_id: scoringMatch.p1Id,
+		player2_id: scoringMatch.p2Id
+	  }) === true;
 
   mountScoringConsole({
     mode: canScore ? "allowed" : "forbidden"
@@ -82,11 +83,12 @@ window.refreshScoringConsoleIfOpen = function () {
   const root = document.getElementById("scoring-console");
   if (!root || !window.scoringMatch) return;
 
-  const canScore =
-    window.auth?.can?.("score_match", {
-      type: "match",
-      id: window.scoringMatch.matchId
-    }) === true;
+const canScore =
+  window.App?.Auth?.canScoreMatch?.({
+    id: scoringMatch.matchId,
+    player1_id: scoringMatch.p1Id,
+    player2_id: scoringMatch.p2Id
+  }) === true;
 
   mountScoringConsole({
     mode: canScore ? "allowed" : "forbidden"
@@ -269,10 +271,15 @@ async function scoringAddScore(score, opts = {}) {
     isFault
   });
 
-// After inserting the throw and recalcing SP:
-  await recalcMatchSmallPoints(scoringMatch.matchId);
+	// After inserting the throw and recalcing SP:
+	await recalcMatchSmallPoints(scoringMatch.matchId);
 
-  if (await checkSetWin()) return;
+	// 🔴 ADD THIS BLOCK
+	if (await checkThreeMissLoss(playerKey)) return;
+
+	// Existing logic
+	if (await checkSetWin()) return;
+
 
   // Flip thrower FIRST
   scoringCurrentThrower = isP1 ? "p2" : "p1";
@@ -297,6 +304,65 @@ function applyScore(before, score, isFault) {
   }
   const next = before + score;
   return next > 50 ? 25 : next;
+}
+
+async function checkThreeMissLoss(playerKey) {
+  if (scoringConsecutiveMisses[playerKey] < 3) return false;
+
+  const loserId =
+    playerKey === "p1" ? scoringMatch.p1Id : scoringMatch.p2Id;
+  const winnerId =
+    playerKey === "p1" ? scoringMatch.p2Id : scoringMatch.p1Id;
+	
+	// FORCE 50–0 score on three-miss loss
+	const loserIsP1 = playerKey === "p1";
+
+	scoringCurrentSetSP1 = loserIsP1 ? 0 : 50;
+	scoringCurrentSetSP2 = loserIsP1 ? 50 : 0;
+
+  // Persist set result
+  const { error: setErr } = await window.supabaseClient
+    .from("sets")
+    .update({
+      score_player1: scoringCurrentSetSP1,
+      score_player2: scoringCurrentSetSP2,
+      winner_player_id: winnerId,
+      current_thrower: null
+    })
+    .eq("id", scoringCurrentSetId);
+
+  if (setErr) {
+    console.error("[three-miss] failed to update set", setErr);
+    return false;
+  }
+
+  // Update match set count
+  if (winnerId === scoringMatch.p1Id) scoringMatch.setsP1++;
+  if (winnerId === scoringMatch.p2Id) scoringMatch.setsP2++;
+
+  await window.supabaseClient
+    .from("matches")
+    .update({
+      final_sets_player1: scoringMatch.setsP1,
+      final_sets_player2: scoringMatch.setsP2
+    })
+    .eq("id", scoringMatch.matchId);
+
+  // Advance to next set
+  scoringMatch.currentSetNumber++;
+  scoringCurrentSetId = null;
+  scoringCurrentSetSP1 = 0;
+  scoringCurrentSetSP2 = 0;
+  scoringCurrentThrower = null;
+  scoringConsecutiveMisses = { p1: 0, p2: 0 };
+
+  await recalcMatchSmallPoints(scoringMatch.matchId);
+
+  updateScoringHeaderUI();
+  syncStartSetUI();
+  updateStartSetVisibility();
+
+  return true;
 }
 
 // -----------------------------------------------------------

@@ -17,6 +17,15 @@ const FRIENDLIES_TOURNAMENT_ID = "11111111-1111-1111-1111-111111111111";
 
   renderAuthControls();
 })();
+/* 
+supabaseClient.auth.onAuthStateChange((event, session) => {
+  console.log("[auth]", event);
+
+  window.currentUser = session?.user ?? null;
+  window.SUPERADMIN = false;
+
+  scheduleAuthRefresh();
+}); */
 
 document.addEventListener("click", (ev) => {
     const el = ev.target.closest(".match-header-player");

@@ -50,6 +50,28 @@ function setAddFriendlyVisible(visible) {
     addFriendlyBtn.style.display = visible ? "inline-flex" : "none";
 }
 
+function canCreateTournamentMatch(tournament) {
+  if (!tournament) return false;
+  if (!window.auth) return false;
+
+  // Only casual tournaments
+  if (tournament.type !== "casual") return false;
+
+  const playerIds = window.auth.players || [];
+  if (!playerIds.length) return false;
+
+  const matches = window.currentMatches || [];
+  if (!matches.length) return false;
+
+  // IMPORTANT: matches use player1.id / player2.id, NOT *_id
+  return matches.some(m =>
+    playerIds.includes(m.player1?.id) ||
+    playerIds.includes(m.player2?.id)
+  );
+}
+
+window.canCreateTournamentMatch = canCreateTournamentMatch;
+
 function linkToTournament(tId, label, tab = "standings") {
     return `<a href="#/tournament/${tId}?tab=${tab}" class="nav-link">${label}</a>`;
 }
@@ -94,6 +116,9 @@ function renderAuthControls() {
 
   container.replaceChildren();
 
+  // --------------------
+  // Not logged in
+  // --------------------
   if (!window.currentUser) {
     const btn = document.createElement("button");
     btn.className = "header-btn small";
@@ -103,18 +128,37 @@ function renderAuthControls() {
     return;
   }
 
+  // --------------------
   // Logged in
+  // --------------------
   const wrapper = document.createElement("div");
   wrapper.style.display = "flex";
   wrapper.style.gap = "8px";
   wrapper.style.alignItems = "center";
 
-  if (window.SUPERADMIN) {
-    const badge = document.createElement("div");
-    badge.className = "pill live";
-    badge.textContent = "Admin";
-    wrapper.appendChild(badge);
+  // Determine role pill
+  let pillText = "Logged in";
+  let pillClass = "pill";
+
+  const perms = window.auth?.permissions || [];
+
+  if (perms.some(p => p.role === "super_admin")) {
+    pillText = "Super admin";
+    pillClass = "pill live";
+  } else if (
+    perms.some(p =>
+      p.role === "country_admin" ||
+      p.role === "tournament_admin"
+    )
+  ) {
+    pillText = "Admin";
+    pillClass = "pill live";
   }
+
+  const pill = document.createElement("div");
+  pill.className = pillClass;
+  pill.textContent = pillText;
+  wrapper.appendChild(pill);
 
   const logoutBtn = document.createElement("button");
   logoutBtn.className = "header-btn small secondary";
@@ -124,6 +168,7 @@ function renderAuthControls() {
   wrapper.appendChild(logoutBtn);
   container.appendChild(wrapper);
 }
+
 
 function attachPlayerAutocomplete(inputEl, suggestionsEl, playerSourceFn) {
     if (!inputEl || !suggestionsEl) return;
@@ -200,13 +245,23 @@ function renderBottomBar() {
 	  });
 	}
 	  
-	const isFriendlies =
-	window.currentTournamentId === FRIENDLIES_TOURNAMENT_ID;
-
-	const canAddFriendly =
-	  isFriendlies &&
+	const canAddMatch =
+	  !!window.currentTournament &&
 	  !window.currentMatchId &&
-	  auth.can("friendly.create");
+	  (
+		// Admins
+		canManage ||
+
+		// Friendlies
+		(
+		  window.currentTournamentId === FRIENDLIES_TOURNAMENT_ID &&
+		  window.auth?.can("friendly.create")
+		) ||
+
+		// Casual tournament players
+		canCreateTournamentMatch(window.currentTournament)
+	  );
+
 
 	if (canManage) {
 	  buttons.push({
@@ -263,11 +318,11 @@ function renderBottomBar() {
       }
 	  
 	${
-	canAddFriendly
+	canAddMatch
 		? `
-	  <button class="bb-item" data-action="add-friendly">
+	  <button class="bb-item" data-action="add-match">
 		<img src="assets/icon-add.svg" alt="" />
-		<span>Add friendly</span>
+		<span>Add match</span>
 	  </button>
 	`
 		: ""
@@ -307,12 +362,12 @@ function renderBottomBar() {
 			window.location.hash = "#/leagues";
 			return;
 
-		  case "add-friendly":
-			if (canAddFriendly) {
-			  window.location.hash =
-				`#/tournament/${FRIENDLIES_TOURNAMENT_ID}/manage-matches`;
-			}
-			return;
+		case "add-match":
+		  if (canAddMatch) {
+			window.location.hash =
+			  `#/tournament/${window.currentTournamentId}/manage-matches`;
+		  }
+		  return;
 
 		  case "score":
 			if (canScore) openScoringConsole();
