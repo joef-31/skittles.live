@@ -254,6 +254,29 @@ App.Auth.clearViewAs = function () {
 window.viewAs = App.Auth.viewAs;
 window.clearViewAs = App.Auth.clearViewAs;
 
+async function populateViewAsPlayerSelect(playerSelect) {
+  if (!playerSelect) return;
+
+  // Ensure players are loaded
+  if (!Array.isArray(window.allPlayers) || window.allPlayers.length === 0) {
+    await window.loadAllPlayers?.();
+  }
+
+  const players = window.allPlayers || [];
+
+  // Clear existing options except placeholder
+  playerSelect.innerHTML = `<option value="">Select player…</option>`;
+
+  players.forEach(p => {
+    if (!p?.id) return;
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    playerSelect.appendChild(opt);
+  });
+}
+
+
 async function renderViewAsControls() {
   const adminSlot = document.getElementById("header-admin-tools");
   if (!adminSlot) return;
@@ -292,19 +315,6 @@ async function renderViewAsControls() {
 	playerSelect.style.display = "none";
 
 	playerSelect.innerHTML = `<option value="">Select player…</option>`;
-
-	const players =
-	  window.currentPlayers ||
-	  window.tournamentContext?.players ||
-	  window.allPlayers ||
-	  [];
-
-	players.forEach(p => {
-	  const opt = document.createElement("option");
-	  opt.value = p.id;
-	  opt.textContent = p.name;
-	  playerSelect.appendChild(opt);
-	});
 	
 		  // --- Country selector (TEMP / dummy data) ---
 	  const countrySelect = document.createElement("select");
@@ -379,9 +389,10 @@ async function renderViewAsControls() {
 		// Player needs a secondary selection
 		if (role === "player") {
 		  playerSelect.style.display = "inline-block";
+		  populateViewAsPlayerSelect(playerSelect);
 		  return;
 		}
-
+		
 		// Country admin needs country selection
 		if (role === "country_admin") {
 		  countrySelect.style.display = "inline-block";

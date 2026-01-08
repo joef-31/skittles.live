@@ -443,7 +443,31 @@ async function loadTournamentsMenu() {
 	renderCountriesView(countries);
 }
 
+function pickDefaultEdition(editions, currentEditionId) {
+  if (!Array.isArray(editions) || editions.length === 0) {
+    return null;
+  }
+
+  // If current edition still exists, keep it
+  if (
+    currentEditionId &&
+    editions.some(e => e.id === currentEditionId)
+  ) {
+    return currentEditionId;
+  }
+
+  // Otherwise: editions are already sorted most-recent-first
+  return editions[0].id;
+}
+
 async function loadTournamentOverview(tournamentId) {
+	console.time("loadTournamentOverview");
+	console.log(
+	  "[loadTournamentOverview] start",
+	  tournamentId,
+	  JSON.stringify(window.tournamentContext)
+	);
+	
   window.currentMatchId = null;
   window.currentTournamentId = tournamentId;
   window.matchDetailContext = null;
@@ -530,25 +554,27 @@ async function loadTournamentOverview(tournamentId) {
   // ------------------------------------------------
   // 2) Editions (DO NOT FAIL IF EMPTY)
   // ------------------------------------------------
-  const { data: editions = [] } = await window.supabaseClient
-    .from("editions")
-    .select("id, name")
-    .eq("tournament_id", tournamentId)
-    .order("name", { ascending: true });
+	const { data: editions = [] } = await window.supabaseClient
+	  .from("editions")
+	  .select("id, name, start_date, end_date")
+	  .eq("tournament_id", tournamentId)
+	  .order("start_date", { ascending: false });
+
 
   window.currentEditions = editions;
 
   // Ensure edition context if possible
-  if (editions.length) {
-    if (
-      !window.tournamentContext.editionId ||
-      !editions.some(e => e.id === window.tournamentContext.editionId)
-    ) {
-      window.tournamentContext.editionId = editions[0].id;
-    }
-  } else {
-    window.tournamentContext.editionId = null;
-  }
+	if (editions.length) {
+	  if (
+		!window.tournamentContext.editionId ||
+		!editions.some(e => e.id === window.tournamentContext.editionId)
+	  ) {
+		const defaultEdition = pickDefaultEdition(editions);
+		window.tournamentContext.editionId = defaultEdition?.id ?? editions[0].id;
+	  }
+	} else {
+	  window.tournamentContext.editionId = null;
+	}
 
   // ------------------------------------------------
   // 3) Stages (DO NOT FAIL IF EMPTY)
@@ -850,6 +876,7 @@ async function loadTournamentStructure(tournamentId) {
   `);
 
   renderTournamentStructure(tournamentId);
+  console.timeEnd("loadTournamentOverview");
 }
 
 function resolveAdvancementForPosition(position, totalRows, rules) {
@@ -3772,24 +3799,70 @@ function wireManageMatchDelete() {
 // MANAGE: create edition / stage prompts
 // =======================================================
 
-async function createEditionPrompt(tournamentId) {
-  const name = prompt("Edition name (e.g. 2025):");
-  if (!name) return;
+function createEditionPrompt(tournamentId) {
+  const modal = document.getElementById("edition-modal");
+  if (!modal) return;
 
-  const { error } = await window.supabaseClient
-    .from("editions")
-    .insert({ tournament_id: tournamentId, name: name.trim() });
+  const nameInput  = document.getElementById("edition-name");
+  const startInput = document.getElementById("edition-start");
+  const endInput   = document.getElementById("edition-end");
+  const errorBox   = document.getElementById("edition-error");
 
-  if (error) {
-    console.error(error);
-    alert("Failed to create edition.");
-    return;
-  }
+  nameInput.value = "";
+  startInput.value = "";
+  endInput.value = "";
+  errorBox.style.display = "none";
 
-  // Reload current tournament overview so the manage tab reflects the change
-  if (window.currentTournamentId) {
-    loadTournamentOverview(window.currentTournamentId);
-  }
+  modal.style.display = "flex";
+
+  document.getElementById("edition-cancel").onclick = () => {
+    modal.style.display = "none";
+  };
+
+  document.getElementById("edition-create").onclick = async () => {
+    const name = nameInput.value.trim();
+    const startDate = startInput.value;
+    const endDate = endInput.value;
+
+    errorBox.style.display = "none";
+
+    if (!name || !startDate || !endDate) {
+      errorBox.textContent = "All fields are required.";
+      errorBox.style.display = "block";
+      return;
+    }
+
+    const start = new Date(startDate);
+    const end   = new Date(endDate);
+
+    if (end < start) {
+      errorBox.textContent = "End date cannot be before start date.";
+      errorBox.style.display = "block";
+      return;
+    }
+
+    const { error } = await window.supabaseClient
+      .from("editions")
+      .insert({
+        tournament_id: tournamentId,
+        name,
+        start_date: startDate,
+        end_date: endDate
+      });
+
+    if (error) {
+      console.error(error);
+      errorBox.textContent = "Failed to create edition.";
+      errorBox.style.display = "block";
+      return;
+    }
+
+    modal.style.display = "none";
+
+    if (window.currentTournamentId) {
+      loadTournamentOverview(window.currentTournamentId);
+    }
+  };
 }
 
 function openAddGroupsOverlay(stageId) {

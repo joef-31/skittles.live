@@ -37,25 +37,34 @@ function scheduleAuthRefresh() {
 }
 
 function registerAuthListener() {
-  if (authListenerRegistered) return;
-  authListenerRegistered = true;
+  // HARD GUARD: Supabase-level check
+  if (supabaseClient.auth.stateChangeEmitters?.size > 0) {
+    console.warn("[auth] listener already registered");
+    return;
+  }
 
   supabaseClient.auth.onAuthStateChange(async (event, session) => {
-    console.log("[auth]", event);
+    console.log("[auth] state change:", event);
 
-    // Ignore INITIAL_SESSION to avoid double render
     if (event === "INITIAL_SESSION") return;
 
-    window.currentUser = session?.user ?? null;
+    if (!session) {
+      window.currentUser = null;
+      window.SUPERADMIN = false;
+      await App.Auth.loadPermissions(null);
+    } else {
+      window.currentUser = session.user;
+      await App.Auth.loadPermissions(session.user.id);
 
-    if (window.App?.Auth?.loadPermissions) {
-      await App.Auth.loadPermissions(window.currentUser?.id ?? null);
+      window.SUPERADMIN =
+        !!window.auth?.permissions?.some(p => p.role === "super_admin");
     }
 
-    // SINGLE, CLEAN refresh
-    renderAuthControls();
-    renderViewAsControls?.();
-    updateBottomBar();
+    queueMicrotask(() => {
+      renderAuthControls?.();
+      renderViewAsControls?.();
+      updateBottomBar?.();
+    });
   });
 }
 

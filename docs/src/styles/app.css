@@ -289,6 +289,28 @@ h1 {
   gap: 14px;
 }
 
+/* Two-column form layout inside modal-body */
+.modal-body.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+
+/* Allow full-width rows when needed */
+.modal-body .full {
+  grid-column: 1 / -1;
+}
+
+/* Ensure date inputs match auth styling */
+.modal-body input[type="date"] {
+  background: #0b2236;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
 .modal-subtitle {
   font-size: 13px;
   color: #9fb3c8;
