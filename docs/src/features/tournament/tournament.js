@@ -26,6 +26,21 @@ function persistTournamentView(tournamentId) {
 }
 
 function buildTournamentPlayers(matches) {
+
+  const isTeamTournament =
+    Number(
+      window.currentEditions?.find(
+        e => e.id === window.tournamentContext?.editionId
+      )?.min_team_size
+    ) > 1;
+
+  if (isTeamTournament) {
+    // IMPORTANT:
+    // Team matches must NOT be rewritten into player-shaped objects.
+    // Standings relies on team1_id / team2_id staying intact.
+    return;
+  }
+  
     if (!Array.isArray(matches)) {
         window.tournamentPlayers = [];
         return;
@@ -472,6 +487,8 @@ async function loadTournamentOverview(tournamentId) {
   window.currentTournamentId = tournamentId;
   window.matchDetailContext = null;
   window.tournamentContext.tournamentId = tournamentId;
+  window.currentTeams = [];
+  window.currentTeamMembers = [];
   
 	if (!window.auth) {
 	  showLoading("Loading permissions…");
@@ -489,6 +506,13 @@ async function loadTournamentOverview(tournamentId) {
   
 	const urlParams = new URLSearchParams(window.location.search);
 	const hasTabInUrl = urlParams.has("tab");
+	
+	const { data: allPlayers = [] } = await window.supabaseClient
+	  .from("players")
+	  .select("id, name, country, is_guest")
+	  .order("name");
+
+	window.allPlayers = allPlayers;	
 
   if (!window.location.hash.includes("/initialisation")) {
     window.tournamentContext.manageSubview = null;
@@ -540,7 +564,7 @@ async function loadTournamentOverview(tournamentId) {
   // ------------------------------------------------
   const { data: tournament } = await window.supabaseClient
     .from("tournaments")
-    .select("id, name, country, type")
+	.select("id, name, country, type")
     .eq("id", tournamentId)
     .maybeSingle();
 
@@ -550,13 +574,52 @@ async function loadTournamentOverview(tournamentId) {
   }
 
   window.currentTournament = tournament;
+  
+	// ------------------------------------------------
+	// 1b) Teams (tournament-scoped, optional)
+	// ------------------------------------------------
+	let teams = [];
+	let teamMembers = [];
+
+	{
+	const { data, error } = await window.supabaseClient
+	.from("teams")
+	.select("id, name, created_at")
+	.eq("tournament_id", tournamentId)
+	.order("created_at", { ascending: true });
+
+	if (error) {
+	console.error("[teams] failed to load teams", error);
+	}
+
+	teams = data || [];
+	}
+
+	if (teams.length) {
+	const teamIds = teams.map(t => t.id);
+
+	const { data, error } = await window.supabaseClient
+	.from("team_members")
+	.select("id, team_id, player_id")
+	.in("team_id", teamIds);
+
+	if (error) {
+	console.error("[teams] failed to load team members", error);
+	}
+
+	teamMembers = data || [];
+	}
+
+	window.currentTeams = teams;
+	window.currentTeamMembers = teamMembers;
+
 
   // ------------------------------------------------
   // 2) Editions (DO NOT FAIL IF EMPTY)
   // ------------------------------------------------
 	const { data: editions = [] } = await window.supabaseClient
 	  .from("editions")
-	  .select("id, name, start_date, end_date")
+	  .select("id, name, start_date, end_date, min_team_size")
 	  .eq("tournament_id", tournamentId)
 	  .order("start_date", { ascending: false });
 
@@ -620,22 +683,32 @@ async function loadTournamentOverview(tournamentId) {
   let matches = [];
 
   if (window.tournamentContext.editionId) {
-    let matchQuery = window.supabaseClient
-      .from("matches")
-      .select(`
-        id,
-        match_date,
-        status,
-        final_sets_player1,
-        final_sets_player2,
-        bracket_meta,
-        player1:player1_id ( id, name ),
-        player2:player2_id ( id, name ),
-        tournament:tournament_id ( id, name, country, type ),
-        edition_id,
-        stage_id,
-        group_id
-      `)
+	let matchQuery = window.supabaseClient
+	  .from("matches")
+	  .select(`
+		id,
+		match_date,
+		status,
+		final_sets_player1,
+		final_sets_player2,
+		bracket_meta,
+
+		player1_id,
+		player2_id,
+		team1_id,
+		team2_id,
+
+		player1:player1_id ( id, name ),
+		player2:player2_id ( id, name ),
+		team1:team1_id ( id, name ),
+		team2:team2_id ( id, name ),
+
+		tournament:tournament_id ( id, name, country, type ),
+		edition_id,
+		stage_id,
+		group_id
+	  `)
+
       .eq("tournament_id", tournamentId)
       .eq("edition_id", window.tournamentContext.editionId);
 
@@ -662,6 +735,14 @@ async function loadTournamentOverview(tournamentId) {
 
     const { data } = await matchQuery.order("match_date");
     matches = data || [];
+	
+	// Hydrate team joins in case Postgres FKs are missing (Supabase join returns null)
+	const teamById = new Map((window.currentTeams || []).map(t => [t.id, t]));
+
+	for (const m of matches) {
+	  if (m.team1_id && !m.team1) m.team1 = teamById.get(m.team1_id) || null;
+	  if (m.team2_id && !m.team2) m.team2 = teamById.get(m.team2_id) || null;
+	}
   }
 
   window.currentMatches = matches;
@@ -1026,45 +1107,50 @@ function calculateMatchPoints(stats, rules) {
 function buildGroupStats(matches, sets, config) {
   const stats = {};
 
-  function ensurePlayer(id, name) {
-    if (!stats[id]) {
-      stats[id] = {
-        id,
-        name,
+  const isTeamTournament =
+    Number(
+      window.currentEditions?.find(
+        e => e.id === window.tournamentContext?.editionId
+      )?.min_team_size
+    ) > 1;
 
-        matches_played: 0,
-        matches_won: 0,
-        matches_drawn: 0,
-        matches_lost: 0,
+	function ensureCompetitor(id, name) {
+	  if (!stats[id]) {
+		stats[id] = {
+		  competitor_id: id,
+		  id,              // keep for compatibility
+		  name,
 
-        sets_won: 0,
-        sets_lost: 0,
+		  matches_played: 0,
+		  matches_won: 0,
+		  matches_drawn: 0,
+		  matches_lost: 0,
 
-        small_points_for: 0,
-        small_points_against: 0,
+		  sets_won: 0,
+		  sets_lost: 0,
 
-        match_points: 0
-      };
-    }
-  }
+		  small_points_for: 0,
+		  small_points_against: 0,
 
-  // Seed players
-  matches.forEach(m => {
-    if (m.player1?.id) ensurePlayer(m.player1.id, m.player1.name);
-    if (m.player2?.id) ensurePlayer(m.player2.id, m.player2.name);
-  });
+		  match_points: 0
+		};
+	  }
+	}
 
-  // Played matches
-  matches.forEach(m => {
-    if (!m.player1 || !m.player2) return;
-    if (m.status === "scheduled" || m.status === "structure") return;
-
-    const p1 = stats[m.player1.id];
-    const p2 = stats[m.player2.id];
-
-    p1.matches_played++;
-    p2.matches_played++;
-  });
+  // Seed competitors
+	matches.forEach(m => {
+	  if (isTeamTournament) {
+		if (m.team1_id && m.team1?.name)
+		  ensureCompetitor(m.team1_id, m.team1.name);
+		if (m.team2_id && m.team2?.name)
+		  ensureCompetitor(m.team2_id, m.team2.name);
+	  } else {
+		if (m.player1?.id)
+		  ensureCompetitor(m.player1.id, m.player1.name);
+		if (m.player2?.id)
+		  ensureCompetitor(m.player2.id, m.player2.name);
+	  }
+	});
 
   // Sets
 	 sets.forEach(s => {
@@ -1107,23 +1193,34 @@ function buildGroupStats(matches, sets, config) {
 	matches.forEach(m => {
 	  if (m.status === "scheduled" || m.status === "structure") return;
 
-	  const p1 = stats[m.player1.id];
-	  const p2 = stats[m.player2.id];
+	  let c1, c2;
 
-	  if (!p1 || !p2) return;
-
-	  if (p1.sets_won > p2.sets_won) {
-		p1.matches_won++;
-		p2.matches_lost++;
-	  } else if (p2.sets_won > p1.sets_won) {
-		p2.matches_won++;
-		p1.matches_lost++;
+	  if (isTeamTournament) {
+		if (!m.team1_id || !m.team2_id) return;
+		c1 = stats[m.team1_id];
+		c2 = stats[m.team2_id];
 	  } else {
-		p1.matches_drawn++;
-		p2.matches_drawn++;
+		if (!m.player1 || !m.player2) return;
+		c1 = stats[m.player1.id];
+		c2 = stats[m.player2.id];
 	  }
-	});
 
+	  if (!c1 || !c2) return;
+	  
+	    c1.matches_played++;
+		c2.matches_played++;
+
+		if (c1.sets_won > c2.sets_won) {
+		  c1.matches_won++;
+		  c2.matches_lost++;
+		} else if (c2.sets_won > c1.sets_won) {
+		  c2.matches_won++;
+		  c1.matches_lost++;
+		} else {
+		  c1.matches_drawn++;
+		  c2.matches_drawn++;
+		}
+	});
 
   // Derived fields
   Object.values(stats).forEach(p => {
@@ -1157,7 +1254,7 @@ function columnLabel(key) {
 
 
 function renderStandingsRow({
-  player,
+  competitor,
   index,
   columns,
   advancementRules,
@@ -1182,14 +1279,17 @@ function renderStandingsRow({
       </td>
 
       <td>
-        <span class="player-link" data-player-id="${player.id}">
-          ${player.name}
-        </span>
+		<span
+		  class="competitor-link"
+		  data-competitor-id="${competitor.competitor_id}"
+		>
+		  ${competitor.name}
+		</span>
       </td>
 
 		${columns.map(key => `
 		  <td style="text-align:center;">
-			${player[key] ?? 0}
+			${competitor[key] ?? 0}
 		  </td>
 		`).join("")}
     </tr>
@@ -1212,7 +1312,7 @@ function renderStandingsGroup({
       <thead>
         <tr>
           <th class="pos">Pos</th>
-          <th>Player</th>
+          <th>Competitor</th>
           ${config.columns.map(col =>
             `<th style="text-align:center;">${columnLabel(col)}</th>`
           ).join("")}
@@ -1221,18 +1321,20 @@ function renderStandingsGroup({
       <tbody>
         ${
           rows.length
-            ? rows.map((player, index) =>
-			  renderStandingsRow({
-				player,
-				index,
-				columns: config.columns,
-				advancementRules,
-				groupSize: rows.length
-			  })
-			).join("")
-            : `<tr><td colspan="${config.columns.length + 2}" class="empty-message">
-                 No matches yet
-               </td></tr>`
+            ? rows.map((competitor, index) =>
+                renderStandingsRow({
+                  competitor,
+                  index,
+                  columns: config.columns,
+                  advancementRules,
+                  groupSize: rows.length
+                })
+              ).join("")
+            : `<tr>
+                 <td colspan="${config.columns.length + 2}" class="empty-message">
+                   No matches yet
+                 </td>
+               </tr>`
         }
       </tbody>
     </table>
@@ -2109,6 +2211,18 @@ function renderTournamentManageTab(
 			</button>
 		  </div>
 		</div>
+		
+		<div class="card manage-card clickable" id="manage-teams-card">
+		  <div class="manage-title">Teams</div>
+		  <div class="manage-desc">
+			Create and manage teams for this tournament.
+		  </div>
+		  <div class="manage-actions">
+			<button class="header-btn small" type="button">
+			  Manage teams
+			</button>
+		  </div>
+		</div>
 
 		<!-- SINGLE, correct subview container -->
 		<div id="manage-subview" style="grid-column: 1 / -1;"></div>
@@ -2168,6 +2282,14 @@ function renderTournamentManageTab(
 		window.location.hash = `#/tournament/${tournament.id}/structure`;
 	  });
 	}
+	
+	// Open teams manager
+	const teamsCard = el.querySelector("#manage-teams-card");
+	if (teamsCard) {
+		teamsCard.addEventListener("click", () => {
+		  window.location.hash = `#/tournament/${tournament.id}/teams`;
+		});
+	}
 
 	// Render manage subview
 	const subviewEl = el.querySelector("#manage-subview");
@@ -2188,6 +2310,10 @@ function renderTournamentManageTab(
 		stageId: window.tournamentContext.stageId,
 		container: subviewEl
 	  });
+	}
+	
+	if (window.tournamentContext.manageSubview === "teams") {
+	  App.Teams.renderManageTeamsSection(subviewEl);
 	}
 }
 
@@ -3466,6 +3592,109 @@ function rerenderStandingsOnly() {
   );
 }
 
+function renderTournamentTeamsPage(tournamentId) {
+  setContent(`
+    <div class="card">
+      <div class="tournament-header">
+        <div class="tournament-name">
+          Teams
+        </div>
+        <div class="subtitle">
+          ${window.currentTournament?.name || ""}
+        </div>
+      </div>
+
+      <div id="teams-page-content"></div>
+    </div>
+  `);
+
+  const container = document.getElementById("teams-page-content");
+  App.Teams.renderManageTeamsSection(container);
+}
+
+window.App = window.App || {};
+App.Teams = App.Teams || {};
+
+App.Teams.renderManageTeamsSection = function (container) {
+  const teams = window.currentTeams || [];
+  const allPlayers = window.allPlayers || [];
+
+  if (!teams.length) {
+    container.innerHTML = `
+      <div class="card">
+        <div class="empty-message">
+          No teams have been created for this event.
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = `
+  
+    <div class="teams-toolbar">
+		<button class="header-btn" id="teams-bulk-import-btn">
+		  Bulk import teams
+		</button>
+	</div>
+
+  <div id="teams-import-panel"></div>
+    <div class="card">
+      <div class="table-wrap">
+        <table class="teams-table">
+          <thead>
+            <tr>
+              <th>Team</th>
+              <th>#</th>
+              <th>Players</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${teams.map(team => {
+              const members = App.Teams.getMembersForTeam(team.id);
+
+              const names = members
+                .map(m => {
+                  const player = allPlayers.find(p => p.id === m.player_id);
+                  return App.Teams.formatPlayerNameShort(player);
+                })
+                .filter(Boolean);
+
+              const displayNames =
+                names.length > 6
+                  ? `${names.slice(0, 6).join(", ")}, …`
+                  : names.join(", ");
+
+              return `
+                <tr>
+                  <td class="team-name">${team.name}</td>
+                  <td class="team-count">${members.length}</td>
+                  <td class="team-players">${displayNames || "—"}</td>
+                  <td class="team-actions"></td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  
+	const importBtn = container.querySelector("#teams-bulk-import-btn");
+	const panel = container.querySelector("#teams-import-panel");
+
+	if (importBtn && panel) {
+	  importBtn.addEventListener("click", () => {
+		window.teamImportState.open = !window.teamImportState.open;
+		App.Teams.renderImportPanel(panel);
+	  });
+
+	  // Render initial state
+	  App.Teams.renderImportPanel(panel);
+	}
+};
+
 
 function wireStructureEditionChange(tournamentId) {
   const select = document.getElementById("structure-edition");
@@ -3481,7 +3710,6 @@ function wireStructureEditionChange(tournamentId) {
     renderTournamentStructure(tournamentId);
   });
 }
-
 
 function wireStructureAddEdition(tournamentId) {
   const btn = document.getElementById("structure-add-edition");
@@ -3794,7 +4022,6 @@ function wireManageMatchDelete() {
   });
 }
 
-
 // =======================================================
 // MANAGE: create edition / stage prompts
 // =======================================================
@@ -4050,17 +4277,21 @@ async function loadTournamentMatchesManage(tournamentId) {
 
 	let query = window.supabaseClient
 	  .from("matches")
-	  .select(`
-		id,
-		match_date,
-		status,
-		final_sets_player1,
-		final_sets_player2,
-		bracket_meta,
-		stage_id,
-		player1:player1_id ( id, name ),
-		player2:player2_id ( id, name )
-	  `)
+		.select(`
+		  id,
+		  match_date,
+		  status,
+		  final_sets_player1,
+		  final_sets_player2,
+		  bracket_meta,
+		  stage_id,
+
+		  player1:player1_id ( id, name ),
+		  player2:player2_id ( id, name ),
+
+		  team1:team1_id ( id, name ),
+		  team2:team2_id ( id, name )
+		`)
 	  .eq("tournament_id", tournamentId)
 	  .eq("edition_id", editionId);
 
@@ -4126,26 +4357,26 @@ function renderManageMatches(matches) {
 	  window.auth.players.length > 0 &&
 	  !isAdmin;
 	
-  // ---------------------------------------------------
-  // EARLY GUARD — MUST BE BEFORE innerHTML RENDER
-  // ---------------------------------------------------
+	// EARLY GUARD — only block tools that truly need a stage
 	if (
 	  isAdmin &&
+	  !isFriendlies &&
+	  !isCasualPlayer &&
 	  (
 		!window.tournamentContext?.editionId ||
 		!window.tournamentContext?.stageId
 	  )
 	) {
-    el.innerHTML = `
-      <div class="card">
-        <div class="error">
-          Please select an edition and stage before managing matches.
-        </div>
-      </div>
-    `;
-    return;
-  }
-  
+	  el.innerHTML = `
+		<div class="card">
+		  <div class="error">
+			Please select an edition and stage before managing matches.
+		  </div>
+		</div>
+	  `;
+	  return;
+	}
+
   const isEffectiveSuperAdmin =
   window.auth?.permissions?.some(p => p.role === "super_admin");
 
@@ -4305,7 +4536,9 @@ function renderManageMatches(matches) {
               ? matches.map(m => `
                 <div class="match-row" data-mid="${m.id}">
                   <span>
-                    ${m.player1?.name || "TBC"} v ${m.player2?.name || "TBC"}
+                    ${(m.team1?.name || m.player1?.name || "TBC")}
+					 v
+					${(m.team2?.name || m.player2?.name || "TBC")}
                     <span class="pill ${m.status}">${m.status}</span>
                   </span>
                   <span class="muted">
@@ -4926,7 +5159,6 @@ async function ensureAllPlayersLoaded() {
   window.allPlayers = data || [];
 }
 
-
 function wireManageMatchAdd() {
 	const p1Input = document.getElementById("mm-p1");
 	const p2Input = document.getElementById("mm-p2");
@@ -4950,19 +5182,24 @@ function wireManageMatchAdd() {
 	if (!window.allPlayers) {
 	  window.allPlayers = [];
 	}
+	
+	const editionId = window.tournamentContext?.editionId;
+
+	const edition = window.currentEditions
+	  ?.find(e => e.id === editionId);
+	
+	const isTeamTournament =
+		Number(edition?.min_team_size) > 1;
 
 	// Use tournament players OR all players (friendlies)
-	const tournamentPlayers = isFriendlies
-	  ? (window.allPlayers || [])
-	  : (window.tournamentPlayers || []);
-	  
+	  	const competitors = isTeamTournament
+	  ? window.currentTeams
+	  : (isFriendlies ? window.allPlayers : window.tournamentPlayers);
+
 	  console.log("[match add] friendlies:", isFriendlies, {
 	  allPlayers: window.allPlayers?.length,
 	  tournamentPlayers: window.tournamentPlayers?.length
 	});
-
-
-	const allowedPlayerIds = tournamentPlayers.map(p => p.id);
 
   function showErr(msg) {
     if (!err) return;
@@ -4981,10 +5218,10 @@ function wireManageMatchAdd() {
     sugEl.innerHTML = "";
     if (!q.length) return;
 
-    const matches = tournamentPlayers.filter((p) =>
-      (p.name || "").toLowerCase().includes(q)
-    );
-
+	const matches = competitors.filter((c) =>
+	  (c.name || "").toLowerCase().includes(q)
+	);
+	
     matches.slice(0, 5).forEach((p) => {
       const div = document.createElement("div");
       div.className = "friendly-suggestion-item";
@@ -5009,9 +5246,9 @@ function wireManageMatchAdd() {
     const name = (inputEl.value || "").trim().toLowerCase();
     if (!name) return null;
 
-    const found = tournamentPlayers.find(
-      (p) => (p.name || "").toLowerCase() === name
-    );
+	const found = competitors.find(
+	  (c) => (c.name || "").toLowerCase() === name
+	);
     return found ? found.id : null;
   }
 
@@ -5030,7 +5267,11 @@ btn.addEventListener("click", async () => {
   const dateISO = dateInput.value;
 
   if (!p1Id || !p2Id) {
-    showErr("Please select two valid players");
+    showErr(
+	  isTeamTournament
+		? "Please select two valid teams"
+		: "Please select two valid players"
+	);
     return;
   }
 
@@ -5048,8 +5289,9 @@ btn.addEventListener("click", async () => {
       tournament_id: window.currentTournamentId,
       edition_id: window.tournamentContext.editionId,
       stage_id: window.tournamentContext.stageId,
-      player1_id: p1Id,
-      player2_id: p2Id,
+	  ...(isTeamTournament
+	  ? { team1_id: p1Id, team2_id: p2Id }
+	  : { player1_id: p1Id, player2_id: p2Id }),
       match_date: dateISO,
       status: statusVal,
       final_sets_player1: s1Val,
@@ -5107,8 +5349,9 @@ btn.addEventListener("click", async () => {
 			  tournament_id: window.currentTournamentId,
 			  edition_id: window.tournamentContext.editionId,
 			  stage_id: window.tournamentContext.stageId,
-			  player1_id: p1Id,
-			  player2_id: p2Id,
+			  ...(isTeamTournament
+			  ? { team1_id: p1Id, team2_id: p2Id }
+			  : { player1_id: p1Id, player2_id: p2Id }),
 			  match_date: dateISO,
 			  status: statusVal,
 			  final_sets_player1: s1Val,
@@ -5712,6 +5955,12 @@ async function syncGroupInitialisation({
   groupId,
   lines
 }) {
+	const edition = window.currentEditions
+		?.find(e => e.id === editionId);
+	
+	const isTeamTournament =
+		Number(edition?.min_team_size) > 1;
+  
   const out = { added: 0, removed: 0, skipped: 0, errors: [] };
 
   const desired = lines
@@ -5721,22 +5970,36 @@ async function syncGroupInitialisation({
     })
     .filter(p => p.name);
 
-  const { data: existing, error } = await window.supabaseClient
-    .from("matches")
-    .select(`
-      id,
-      player1_id,
-      player1:player1_id ( name )
-    `)
+	const { data: existing, error } = await window.supabaseClient
+	  .from("matches")
+	  .select(
+		isTeamTournament
+		  ? `
+			  id,
+			  team1_id,
+			  team1:team1_id ( name )
+			`
+		  : `
+			  id,
+			  player1_id,
+			  player1:player1_id ( name )
+			`
+	  )
     .eq("status", "structure")
     .eq("stage_id", stageId)
     .eq("group_id", groupId);
 
   if (error) throw error;
 
-  const existingByName = new Map(
-    (existing || []).map(r => [r.player1.name.toLowerCase(), r])
-  );
+	const existingByName = new Map(
+	  (existing || []).map(r => [
+		(isTeamTournament
+		  ? r.team1?.name
+		  : r.player1?.name
+		)?.toLowerCase(),
+		r
+	  ])
+	);
 
   const desiredNames = new Set(desired.map(p => p.name.toLowerCase()));
 
@@ -5756,38 +6019,66 @@ async function syncGroupInitialisation({
     }
 
     try {
-      let { data: player } = await window.supabaseClient
-        .from("players")
-        .select("id")
-        .eq("name", p.name)
-        .maybeSingle();
+		let competitorRow;
 
-      if (!player) {
-        const { data: created } = await window.supabaseClient
-          .from("players")
-          .insert({
-            name: p.name,
-            country: p.country,
-            is_guest: false
-          })
-          .select("id")
-          .single();
+		if (isTeamTournament) {
+		  const { data } = await window.supabaseClient
+			.from("teams")
+			.select("id")
+			.eq("name", p.name)
+			.maybeSingle();
 
-        player = created;
-      }
+		  if (!data) {
+			throw new Error(`Team not found: ${p.name}`);
+		  }
 
-      await window.supabaseClient.from("matches").insert({
-        tournament_id: tournamentId,
-        edition_id: editionId,
-        stage_id: stageId,
-        group_id: groupId,
-        status: "structure",
-        player1_id: player.id,
-        player2_id: null,
-        match_date: new Date().toISOString(),
-        final_sets_player1: 0,
-        final_sets_player2: 0
-      });
+		  competitorRow = data;
+		} else {
+		  let { data } = await window.supabaseClient
+			.from("players")
+			.select("id")
+			.eq("name", p.name)
+			.maybeSingle();
+
+		  if (!data) {
+			const created = await window.supabaseClient
+			  .from("players")
+			  .insert({
+				name: p.name,
+				country: p.country,
+				is_guest: false
+			  })
+			  .select("id")
+			  .single();
+
+			data = created.data;
+		  }
+
+		  competitorRow = data;
+		}
+
+	const matchPayload = {
+	  tournament_id: tournamentId,
+	  edition_id: editionId,
+	  stage_id: stageId,
+	  group_id: groupId,
+	  status: "structure",
+	  match_date: new Date().toISOString(),
+	  final_sets_player1: 0,
+	  final_sets_player2: 0
+	};
+
+	if (isTeamTournament) {
+	  matchPayload.team1_id = competitorRow.id;
+	  matchPayload.team2_id = null;
+	} else {
+	  matchPayload.player1_id = competitorRow.id;
+	  matchPayload.player2_id = null;
+	}
+
+	await window.supabaseClient
+	  .from("matches")
+	  .insert(matchPayload);
 
       out.added++;
     } catch (err) {

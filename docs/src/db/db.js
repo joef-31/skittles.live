@@ -102,16 +102,17 @@ async function dbInsertThrow({
   isMiss,
   isFault,
 }) {
-  const record = {
-    match_id: matchId,
-    set_id: setId || null,
-    set_number: setNumber,
-    throw_number: throwNumber,
-    player_id: playerId,
-    score: score,
-    is_miss: !!isMiss,
-    is_fault: !!isFault,
-  };
+	const record = {
+	  match_id: matchId,
+	  set_id: setId || null,
+	  set_number: setNumber,
+	  throw_number: throwNumber,
+	  side: scoringCurrentThrower, // p1 / p2
+	  player_id: playerId || null, // optional, later
+	  score,
+	  is_miss: !!isMiss,
+	  is_fault: !!isFault
+	};
 
   const { data, error } = await supabaseClient.from("throws").insert(record);
 

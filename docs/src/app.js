@@ -49,3 +49,15 @@ document.addEventListener("click", (ev) => {
 });
 
 App.Core.Router.init();
+
+window.App = window.App || {};
+App.Teams = App.Teams || {};
+
+/**
+ * Returns true if this tournament should be treated as team-based.
+ * Teams are optional; presence activates team logic.
+ */
+App.Teams.isTeamTournament = function () {
+  return Array.isArray(window.currentTeams) &&
+         window.currentTeams.length > 0;
+};

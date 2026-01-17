@@ -163,4 +163,19 @@ Router.registerRoute(
       loadTournamentOverview(tid);
     }
   );
+  
+	// /tournament/:tid/teams
+	Router.registerRoute(
+	  /^\/tournament\/(?<tid>[^/]+)\/teams$/,
+	  ({ params }) => {
+		const tid = params.tid;
+		window.currentTournamentId = tid;
+
+		// Ensure tournament context exists
+		window.tournamentContext = window.tournamentContext || {};
+		window.tournamentContext.activeOverviewTab = "manage";
+
+		loadTournamentTeams(tid);
+	  }
+	);
 })();

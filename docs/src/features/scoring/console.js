@@ -41,6 +41,7 @@ window.mountScoringConsole = function mountScoringConsole({ mode }) {
 
       <div id="start-set-overlay" class="start-set-panel" style="display:none">
         <h3 id="start-set-title"></h3>
+		<div id="set-lineup-slots"></div>
         <div id="start-set-sub">Who throws first?</div>
         <div class="start-buttons">
           <button id="start-set-with-p1" class="header-btn"></button>

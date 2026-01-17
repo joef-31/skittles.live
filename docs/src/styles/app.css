@@ -2179,3 +2179,143 @@ input[type="number"] {
   line-height: 1.2;
   display: block;
 }
+
+.teams-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.teams-table th,
+.teams-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.teams-table thead th {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.teams-table tbody tr + tr td {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.team-count {
+  width: 40px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.team-actions {
+  width: 40px;
+}
+
+.team-lineups {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.team-column {
+  background: rgba(255,255,255,0.03);
+  padding: 4px;
+  border-radius: 6px;
+}
+
+.team-name {
+  font-weight: 600;
+  font-size: 0.7em;
+  opacity: 0.6;
+  padding: 4px 6px;
+  text-transform: uppercase;
+}
+
+.team-player {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7em;
+}
+
+.team-player.substitute {
+  opacity: 0.25;
+  font-size: 0.7em;
+}
+
+.team-subs {
+  margin-top: 4px;
+}
+
+.team-player .tikku-slot {
+  width: 20px;       /* fixed column */
+  display: flex;
+  justify-content: center;
+}
+
+.set-lineup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* Lineup columns */
+.set-lineup-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+}
+
+/* Dropdowns */
+.set-lineup-select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #0f1c2e;
+  color: #fff;
+  border: 1px solid #2a3f5f;
+  font-size: 0.9rem;
+}
+
+.set-lineup-select:focus {
+  outline: none;
+  border-color: #4aa3ff;
+}
+
+/* Grid holding the two teams */
+.set-lineup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+
+.set-lineup-hint {
+  text-align: center;
+  font-size: 0.85rem;
+  opacity: 0.75;
+  margin-bottom: 10px;
+}
+
+.icon-tikku {
+  color: var(--live-set-text);
+  width: 14px;
+  height: 14px;
+  vertical-align: -0.15em;
+  margin-right: 0.25em;
+  display: inline-block;
+}
+
+.tikku-holder {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  margin: 0 4px;
+}
+
+.tikku-holder.hidden {
+  visibility: hidden;
+}

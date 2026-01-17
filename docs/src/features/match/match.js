@@ -18,16 +18,19 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
   const { data: match, error: matchError } =
     await window.supabaseClient
       .from("matches")
-      .select(`
-        id,
-        match_date,
-        status,
-        final_sets_player1,
-        final_sets_player2,
-        player1:player1_id ( id, name ),
-        player2:player2_id ( id, name ),
-        tournament:tournament_id ( id, name )
-      `)
+		.select(`
+		  id,
+		  match_date,
+		  status,
+		  final_sets_player1,
+		  final_sets_player2,
+		  player1:player1_id ( id, name ),
+		  player2:player2_id ( id, name ),
+		  team1:team1_id ( id, name ),
+		  team2:team2_id ( id, name ),
+		  edition_id,
+		  tournament:tournament_id ( id, name )
+		`)
       .eq("id", matchId)
       .maybeSingle();
 
@@ -36,6 +39,29 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
     App.Utils.DOM.showError("Failed to load match");
     return;
   }
+  
+	  // Ensure globals exist (match route may bypass overview)
+	window.currentTeamMembers = Array.isArray(window.currentTeamMembers)
+	  ? window.currentTeamMembers
+	  : [];
+
+	window.allPlayers = Array.isArray(window.allPlayers)
+	  ? window.allPlayers
+	  : [];
+	  
+	  let editionMinTeamSize = null;
+
+	if (match.edition_id) {
+	  const { data: edition, error } = await window.supabaseClient
+		.from("editions")
+		.select("id, min_team_size")
+		.eq("id", match.edition_id)
+		.maybeSingle();
+
+	  if (!error && edition) {
+		editionMinTeamSize = Number(edition.min_team_size) || 0;
+	  }
+	}
 
   // -----------------------
   // Load sets
@@ -72,8 +98,51 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
     return;
   }
   
-  const p1Name = match.player1?.name || "Player 1";
-  const p2Name = match.player2?.name || "Player 2";
+	const isTeamTournament = Boolean(match.team1 || match.team2);
+	
+	if (window.allPlayers.length === 0) {
+	  const { data, error } = await window.supabaseClient
+		.from("players")
+		.select("id, name");
+
+	  if (!error) {
+		window.allPlayers = data || [];
+	  }
+	}
+	  
+	const p1Name = isTeamTournament
+	  ? match.team1?.name || "Team 1"
+	  : match.player1?.name || "Player 1";
+
+	const p2Name = isTeamTournament
+	  ? match.team2?.name || "Team 2"
+	  : match.player2?.name || "Player 2";
+	  
+		// -----------------------
+		// Load team members (team matches only)
+		// -----------------------
+		if (isTeamTournament) {
+		  const teamIds = [
+			match.team1?.id,
+			match.team2?.id
+		  ].filter(Boolean);
+
+		  if (teamIds.length) {
+			const { data: members, error } = await window.supabaseClient
+			  .from("team_members")
+			  .select("team_id, player_id")
+			  .in("team_id", teamIds);
+
+			if (error) {
+			  console.error("[team_members] load failed", error);
+			  window.currentTeamMembers = [];
+			} else {
+			  window.currentTeamMembers = members || [];
+			}
+		  } else {
+			window.currentTeamMembers = [];
+		  }
+		}
 
 	// --------------------------------------------------
 	// Match detail context (used by scoring + live views)
@@ -81,13 +150,46 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
 	window.matchDetailContext = {
 	  matchId,
 	  tournamentId,
-	  p1Id: match.player1?.id || null,
-	  p2Id: match.player2?.id || null,
+
+	  p1Id: isTeamTournament
+		? match.team1?.id ?? null
+		: match.player1?.id ?? null,
+
+	  p2Id: isTeamTournament
+		? match.team2?.id ?? null
+		: match.player2?.id ?? null,
+
 	  p1Name,
 	  p2Name
 	};
 	
 	renderBottomBar();
+	
+	// -----------------------
+	// Load set lineups (team matches only)
+	// -----------------------
+	window.currentSetLineups = { p1: [], p2: [] };
+
+	if (isTeamTournament && sets?.length) {
+	  const liveSet = sets.find(s => !s.winner_player_id);
+
+	  if (liveSet) {
+		const { data: lineups, error } = await window.supabaseClient
+		  .from("set_lineups")
+		  .select("team_id, player_id")
+		  .eq("set_id", liveSet.id);
+
+		if (!error && Array.isArray(lineups)) {
+		  lineups.forEach(row => {
+			if (row.team_id === match.team1?.id) {
+			  window.currentSetLineups.p1.push(row.player_id);
+			} else if (row.team_id === match.team2?.id) {
+			  window.currentSetLineups.p2.push(row.player_id);
+			}
+		  });
+		}
+	  }
+	}
   
 	// ===================================================
 	// Initialise scoring system for this match
@@ -96,7 +198,13 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
 	  window.resetScoringStateForMatch &&
 	  typeof window.resetScoringStateForMatch === "function"
 	) {
-	  resetScoringStateForMatch(match, sets || []);
+	  resetScoringStateForMatch(
+		  {
+			...match,
+			min_team_size: editionMinTeamSize
+		  },
+		  sets || []
+		);
 	} else {
 	  console.warn(
 		"[match] resetScoringStateForMatch not available – scoring disabled"
@@ -130,6 +238,14 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
 
   const overallSets =
     `${match.final_sets_player1 ?? 0} – ${match.final_sets_player2 ?? 0}`;
+	
+	console.log("[match header]", {
+	isTeamTournament,
+	p1Name,
+	p2Name,
+	team1: match.team1,
+	team2: match.team2
+	});
 
   // -----------------------
   // Render header + container
@@ -141,17 +257,15 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
       </div>
 
       <div class="top-score-row">
-        <span style="text-align: right;" class="match-header-player"
-              data-player-id="${match.player1?.id}">
-          ${p1Name}
-        </span>
+		<span class="match-header-player" data-side="p1" style="text-align:right;">
+		  ${p1Name}
+		</span>
 
-        <div class="top-score">${overallSets}</div>
+		<div class="top-score">${overallSets}</div>
 
-        <span class="match-header-player"
-              data-player-id="${match.player2?.id}">
-          ${p2Name}
-        </span>
+		<span class="match-header-player" data-side="p2">
+		  ${p2Name}
+		</span>
       </div>
 	  
 		  <div class="live-throwstrip-row">
@@ -159,6 +273,8 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
 			<div class="live-setscore" id="header-live-setscore"></div>
 			<div class="live-throwstrip p2" id="header-throws-p2"></div>
 		  </div>
+	  
+		<div class="team-lineups" id="team-lineups"></div>
 
 		  <div class="current-thrower" id="scoring-current-thrower-label"></div>
 
@@ -170,7 +286,6 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
         <span class="pill ${pillClass}">${pillLabel}</span>
       </div>
     </div>
-	</div>
 
     <div class="card">
       <div class="tab-row">
@@ -179,6 +294,9 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
       <div id="tab-sets"></div>
     </div>
   `);
+	
+	renderTeamLineups(window.scoringMatch);
+	syncHeaderTikku();
   
 	  if (liveSet) {
 	  // 1️⃣ Live set score
@@ -196,14 +314,17 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId) {
   // -----------------------
   // Render sets (expandable)
   // -----------------------
-App.Features.Match.renderMatchSets(
-  sets,
-  throwsBySet,
-  match.player1?.id,
-  match.player2?.id,
-  p1Name,
-  p2Name
-);
+	const c1Id = isTeamTournament ? match.team1?.id : match.player1?.id;
+	const c2Id = isTeamTournament ? match.team2?.id : match.player2?.id;
+
+	App.Features.Match.renderMatchSets(
+	  sets,
+	  throwsBySet,
+	  c1Id,
+	  c2Id,
+	  p1Name,
+	  p2Name
+	);
 
   // -----------------------
   // Bottom bar (contextual)
@@ -212,6 +333,25 @@ App.Features.Match.renderMatchSets(
     App.UI.updateBottomBar();
   }
 };
+
+function syncHeaderTikku() {
+  document
+    .querySelectorAll(".match-header-player")
+    .forEach(el => el.querySelector(".tikku-icon")?.remove());
+
+  if (!scoringCurrentSetId || !scoringCurrentThrower) return;
+
+	const target = document.querySelector(
+	  `.match-header-player[data-side="${scoringCurrentThrower}"]`
+	);
+  if (!target) return;
+
+  const img = document.createElement("img");
+  img.src = "assets/icon-tikku.svg";
+  img.className = "tikku-icon";
+
+  target.prepend(img);
+}
 
 function isPlayableMatch(m) {
   return (
@@ -230,6 +370,13 @@ function renderMatchCards(
 ) {
     const matchesContainer = document.getElementById(targetId);
     if (!matchesContainer) return;
+	
+	const isTeamTournament =
+	  Number(
+		window.currentEditions?.find(
+		  e => e.id === window.tournamentContext?.editionId
+		)?.min_team_size
+	  ) > 1;
 
     let filtered = matches;
 
@@ -248,8 +395,13 @@ function renderMatchCards(
     let html = '<div class="section-title">Matches</div>';
 
     filtered.forEach((m) => {
-        const p1Name = m.player1?.name || "Player 1";
-        const p2Name = m.player2?.name || "Player 2";
+		const p1Name = isTeamTournament
+		  ? m.team1?.name || "TBC"
+		  : m.player1?.name || "Player 1";
+
+		const p2Name = isTeamTournament
+		  ? m.team2?.name || "TBC"
+		  : m.player2?.name || "Player 2";
 
         const setsScore1 = m.final_sets_player1 ?? 0;
         const setsScore2 = m.final_sets_player2 ?? 0;
@@ -393,7 +545,9 @@ function renderTournamentFixturesTab(matches) {
     const el = document.getElementById("tab-fixtures");
     if (!el) return;
 
-    const upcoming = matches.filter(m => m.status === "scheduled");
+    const upcoming = matches.filter(
+		m => ["scheduled", "live"].includes(m.status)
+	);
 
     if (!upcoming.length) {
         el.innerHTML =
@@ -732,6 +886,99 @@ updateCumulativeDisplay();
   });
 }
 
+function renderTeamLineups() {
+  const wrap = document.getElementById("team-lineups");
+  if (!wrap) return;
+
+  if (!window.scoringMatch?.isTeamMatch) {
+    wrap.innerHTML = "";
+    return;
+  }
+
+  const members = Array.isArray(window.currentTeamMembers)
+    ? window.currentTeamMembers
+    : [];
+
+const renderTeam = (sideModel, sideKey) => {
+  if (!sideModel || sideModel.type !== "team") return "";
+
+  const teamId = sideModel.id;
+  const teamName = sideModel.name;
+
+  const activeLineup = Array.isArray(sideModel.lineup)
+    ? sideModel.lineup
+    : [];
+
+  const teamMembers = members
+    .filter(m => m.team_id === teamId)
+    .map(m => m.player_id);
+
+  if (!teamMembers.length) return "";
+
+  // Do we have an active set?
+  const hasActiveSet =
+    Boolean(scoringCurrentSetId) && activeLineup.length > 0;
+
+  // Active players = lineup order
+  const activePlayers = hasActiveSet
+    ? activeLineup.filter(pid => teamMembers.includes(pid))
+    : [];
+
+  // Substitutes = remaining team members
+  const subs = teamMembers.filter(
+    pid => !activePlayers.includes(pid)
+  );
+
+  const renderPlayer = (pid, isActive, idx = null) => {
+    const name =
+      window.allPlayers.find(p => p.id === pid)?.name || "Unknown";
+
+    const showTikku =
+      isActive &&
+      scoringCurrentSetId &&
+      scoringCurrentThrower === sideKey &&
+      sideModel.currentIndex === idx;
+
+    return `
+      <div class="team-player ${isActive ? "active" : "substitute"}">
+        <span class="tikku-slot">
+          ${showTikku ? `<img src="assets/icon-tikku.svg" class="tikku-icon">` : ""}
+        </span>
+        <span class="player-name">${name}</span>
+      </div>
+    `;
+  };
+
+  return `
+    <div class="team-column">
+      <div class="team-name">${teamName}</div>
+
+      ${activePlayers.map((pid, idx) =>
+        renderPlayer(pid, true, idx)
+      ).join("")}
+
+      ${subs.length
+        ? `<div class="team-subs">
+            ${subs.map(pid => renderPlayer(pid, false)).join("")}
+          </div>`
+        : ""}
+    </div>
+  `;
+};
+
+  wrap.innerHTML = `
+	${renderTeam(scoringMatch.sideModel.p1, "p1")}
+	${renderTeam(scoringMatch.sideModel.p2, "p2")}
+  `;
+}
+
+function syncTeamLineupsUI() {
+  if (!window.scoringMatch?.isTeamMatch) return;
+  if (typeof renderTeamLineups !== "function") return;
+
+  renderTeamLineups(window.scoringMatch);
+}
+
 async function DEV_resetMatch(matchId) {
   await supabaseClient.from("throws").delete().eq("match_id", matchId);
   await supabaseClient.from("sets").delete().eq("match_id", matchId);
@@ -741,3 +988,27 @@ async function DEV_resetMatch(matchId) {
     status: "scheduled"
   }).eq("id", matchId);
 }
+
+/*
+(async () => {
+  const matchId = window.currentMatchId;
+
+  if (!matchId) {
+    console.error("No currentMatchId found");
+    return;
+  }
+
+  await supabaseClient.from("throws").delete().eq("match_id", matchId);
+  await supabaseClient.from("sets").delete().eq("match_id", matchId);
+  await supabaseClient
+    .from("matches")
+    .update({
+      final_sets_player1: 0,
+      final_sets_player2: 0,
+      status: "scheduled"
+    })
+    .eq("id", matchId);
+
+  console.log("Match fully reset:", matchId);
+})();
+*/

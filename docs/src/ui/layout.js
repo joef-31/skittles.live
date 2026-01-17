@@ -276,8 +276,7 @@ function renderBottomBar() {
 	}
 	
 	const canAddTournament =
-		isSuperAdmin() &&
-		window.location.hash.startsWith("#/leagues");
+	  window.auth?.can("create_tournament");
 	
   const bar = document.createElement("div");
   bar.id = "bottom-bar";

@@ -10,6 +10,7 @@ App.Auth.Roles = {
 
   country_admin: [
     "manage_country",
+	"create_tournament",
     "manage_tournament",
     "assign_tournament_admin",
     "assign_referee",

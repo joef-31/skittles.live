@@ -2,53 +2,55 @@
 // 7. THROWS / SCORING MODEL HELPERS
 // =======================================================
 
-function buildThrowsModel(throws, player1Id, player2Id) {
-    let cumP1 = 0;
-    let cumP2 = 0;
-    const model = [];
+function buildThrowsModel(throws /*, legacyArg1, legacyArg2 */) {
+  let cumP1 = 0;
+  let cumP2 = 0;
+  const model = [];
 
-    (throws || []).forEach((t) => {
-        const isP1 = t.player_id === player1Id;
-        const raw = t.score ?? 0;
-        const miss = raw === 0;
-        const fault = t.is_fault === true;
+  (throws || []).forEach((t) => {
+    const side = t.side === "p2" ? "p2" : "p1"; // default-safe
+    const isP1 = side === "p1";
 
-        let before = isP1 ? cumP1 : cumP2;
-        let displayScore = "";
+    const raw = Number(t.score ?? 0);
+    const miss = raw === 0 || t.is_miss === true;
+    const fault = t.is_fault === true;
 
-        if (miss) {
-            if (fault && before >= 37) {
-                displayScore = "X↓";
-                if (isP1) cumP1 = 25;
-                else cumP2 = 25;
-            } else {
-                displayScore = "X";
-            }
-        } else {
-            let tentative = before + raw;
-            const bust = tentative > 50;
-            if (bust) {
-                displayScore = raw + "↓";
-                if (isP1) cumP1 = 25;
-                else cumP2 = 25;
-            } else {
-                displayScore = String(raw);
-                if (isP1) cumP1 = tentative;
-                else cumP2 = tentative;
-            }
-        }
+    let before = isP1 ? cumP1 : cumP2;
+    let displayScore = "";
 
-        model.push({
-            throw_number: t.throw_number,
-            isP1,
-            rawScore: raw,
-            displayScore,
-            cumP1,
-            cumP2,
-        });
+    if (miss) {
+      if (fault && before >= 37) {
+        displayScore = "X↓";
+        if (isP1) cumP1 = 25;
+        else cumP2 = 25;
+      } else {
+        displayScore = "X";
+      }
+    } else {
+      const next = before + raw;
+      if (next > 50) {
+        displayScore = raw + "↓";
+        if (isP1) cumP1 = 25;
+        else cumP2 = 25;
+      } else {
+        displayScore = String(raw);
+        if (isP1) cumP1 = next;
+        else cumP2 = next;
+      }
+    }
+
+    model.push({
+      throw_number: t.throw_number,
+      side,      // "p1" / "p2"
+      isP1,
+      rawScore: raw,
+      displayScore,
+      cumP1,
+      cumP2,
     });
+  });
 
-    return model;
+  return model;
 }
 
 function throwBoxHTML(raw) {
@@ -139,7 +141,7 @@ async function updateLiveThrowsForSet(setNumber) {
 
   const { data: throws, error } = await window.supabaseClient
     .from("throws")
-    .select("id, match_id, set_number, throw_number, player_id, score, is_fault")
+    .select("id, match_id, set_number, throw_number, player_id, score, is_fault, side")
     .eq("match_id", window.currentMatchId)
     .eq("set_number", setNumber)
     .order("throw_number", { ascending: true });
@@ -149,8 +151,8 @@ async function updateLiveThrowsForSet(setNumber) {
     return;
   }
 
-  const model = buildThrowsModel(throws || [], p1, p2);
-
+	const model = buildThrowsModel(throws || []);
+	
   // Header throwstrip
   const headerP1 = document.getElementById("header-throws-p1");
   const headerP2 = document.getElementById("header-throws-p2");

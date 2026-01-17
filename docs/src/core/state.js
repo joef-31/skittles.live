@@ -50,7 +50,7 @@ window.tournamentContext.selectedBracketId ??= null;
 window.tournamentContext.bracketRoundIndex ??= 0;
 
 function isSuperAdmin() {
-    return typeof SUPERADMIN !== "undefined" && SUPERADMIN === true;
+  return !!window.auth?.permissions?.some(p => p.role === "super_admin");
 }
 
 function canManageTournament(tournament) {
