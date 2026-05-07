@@ -532,38 +532,55 @@ async function scoringAddScore(score, opts = {}) {
   const isP1 = window.scoringCurrentThrower === "p1";
   const playerKey = isP1 ? "p1" : "p2";
 
-  // Insert throw (DB is source of truth)
   window.__localThrowInFlight = true;
+
   await dbInsertThrow({
     matchId: window.scoringMatch.matchId,
     setId: window.scoringCurrentSetId,
     setNumber: window.scoringMatch.currentSetNumber,
-	throwerSide: window.scoringCurrentThrower,
+    throwerSide: window.scoringCurrentThrower,
     playerId: getCurrentThrowerPlayerId(),
     score,
     isMiss,
     isFault
   });
+
   window.__localThrowInFlight = false;
 
-  // Recalculate small points (derived)
+  const { data: setThrows, error: setThrowsErr } = await window.supabaseClient
+    .from("throws")
+    .select("*")
+    .eq("set_id", window.scoringCurrentSetId)
+    .order("throw_number", { ascending: true });
+
+  if (setThrowsErr) {
+    console.error("[scoringAddScore] failed to reload set throws", setThrowsErr);
+    return;
+  }
+
+  const rebuilt = rebuildSetStateFromThrows(setThrows || []);
+
+  await window.supabaseClient
+    .from("sets")
+    .update({
+      score_player1: rebuilt.sp1,
+      score_player2: rebuilt.sp2,
+      current_thrower: rebuilt.nextThrower
+    })
+    .eq("id", window.scoringCurrentSetId);
+
   await recalcMatchSmallPoints(scoringMatch.matchId);
 
-  // Three-miss loss ends the set
   if (await checkThreeMissLoss(playerKey)) {
     return;
   }
 
-  // Normal set win ends the set
   if (await checkSetWin()) {
     return;
   }
 
-  // 🔑 AUTHORITATIVE REBUILD FROM DB
-  // This keeps Browser A in sync with Browser B
   await syncScoringStateFromDB(window.scoringCurrentSetId);
 
-  // 🔁 Ensure UI reflects rebuilt state
   syncTeamLineupsUI?.();
   syncHeaderTikku();
 }
