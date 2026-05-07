@@ -11,6 +11,23 @@ App.Features = App.Features || {};
 App.Features.Scoring = App.Features.Scoring || {};
 
 window.isScoringConsoleOpen = false;
+window.__localThrowInFlight = false;
+
+// -----------------------------------------------------------
+// Global scoring state (must be accessible to realtime + console)
+// -----------------------------------------------------------
+window.scoringMatch = window.scoringMatch || null;
+
+window.scoringCurrentSetId = window.scoringCurrentSetId || null;
+window.scoringCurrentSetSP1 = window.scoringCurrentSetSP1 ?? 0;
+window.scoringCurrentSetSP2 = window.scoringCurrentSetSP2 ?? 0;
+window.scoringCurrentThrower = window.scoringCurrentThrower || null;
+
+window.scoringThrowHistory = Array.isArray(window.scoringThrowHistory)
+  ? window.scoringThrowHistory
+  : [];
+window.scoringConsecutiveMisses = window.scoringConsecutiveMisses || { p1: 0, p2: 0 };
+
 
 // DOM references
 const scP1Name = document.getElementById("scoring-p1-name");
@@ -25,18 +42,6 @@ const scP2SetSP = document.getElementById("scoring-p2-setsp"); */
 const scCurrentThrowerLabel = document.getElementById(
 	"scoring-current-thrower-label"
 );
-
-// -----------------------------------------------------------
-// Internal state (IDENTICAL to old app)
-// -----------------------------------------------------------
-
-let scoringMatch = null;
-let scoringCurrentSetId = null;
-let scoringCurrentSetSP1 = 0;
-let scoringCurrentSetSP2 = 0;
-let scoringCurrentThrower = null;
-let scoringThrowHistory = [];
-let scoringConsecutiveMisses = { p1: 0, p2: 0 };
 
 // -----------------------------------------------------------
 // Current set lineups (TEAM MATCHES ONLY)
@@ -173,15 +178,18 @@ function getCurrentThrowerPlayerId() {
   return side.lineup[side.currentIndex] ?? null;
 }
 
-function advanceThrowerWithinSide(sideKey) {
-	const side = scoringMatch.sideModel?.[sideKey];
-	if (!side || side.type !== "team") return;
-
-	side.currentIndex =
-		(side.currentIndex + 1) % side.lineup.length;
-}
-
 async function resetScoringStateForMatch(match, sets) {
+	window.__scorerOwnsState = true;
+	let currentSet = null;
+
+	const { data: dbSets } = await window.supabaseClient
+	  .from("sets")
+	  .select("*")
+	  .eq("match_id", match.id)
+	  .order("set_number", { ascending: false });
+
+	const effectiveSets = Array.isArray(dbSets) ? dbSets : sets;
+	
 	sets = sets || [];
 
 	const isTeamMatch = Boolean(match.team1 && match.team2);
@@ -215,36 +223,94 @@ async function resetScoringStateForMatch(match, sets) {
 
 	window.scoringMatch = scoringMatch;
 
-	let currentSet = null;
-	if (sets.length > 0) {
-		const unfinished = sets.filter(
-			s =>
-				!s.winner_player_id &&
-				(s.score_player1 ?? 0) < 50 &&
-				(s.score_player2 ?? 0) < 50
-		);
-		if (unfinished.length) {
-			currentSet = unfinished.reduce((a, b) =>
-				a.set_number > b.set_number ? a : b
-			);
+	// ACTIVE SET MUST BE THROWS-LED (authoritative)
+	const { data: lastThrow, error: lastThrowErr } = await window.supabaseClient
+	  .from("throws")
+	  .select("set_id,set_number,side,throw_number")
+	  .eq("match_id", match.id)
+	  .order("set_number", { ascending: false })
+	  .order("throw_number", { ascending: false })
+	  .limit(1)
+	  .maybeSingle();
+
+	if (lastThrowErr) console.error("[resetScoringStateForMatch] lastThrowErr", lastThrowErr);
+
+	if (!lastThrow?.set_id) {
+	  // no throws in match → no active set yet
+	  const maxSetNum = (effectiveSets || []).length
+		? Math.max(...effectiveSets.map(s => Number(s.set_number) || 0))
+		: 0;
+
+	  window.scoringMatch.currentSetNumber = maxSetNum + 1;
+	  window.scoringCurrentSetId = null;
+	  window.scoringCurrentSetSP1 = 0;
+	  window.scoringCurrentSetSP2 = 0;
+	  window.scoringCurrentThrower = null;
+
+	} else {
+	  // last throw determines the active set number/id
+	  const activeSetId = lastThrow.set_id;
+	  const activeSetNum = Number(lastThrow.set_number) || 1;
+
+	  const { data: activeSet, error: setErr } = await window.supabaseClient
+		.from("sets")
+		.select("id,set_number,score_player1,score_player2,current_thrower,winner_player_id")
+		.eq("id", activeSetId)
+		.maybeSingle();
+
+	  if (setErr) console.error("[resetScoringStateForMatch] setErr", setErr);
+
+	  const finished =
+		activeSet?.winner_player_id ||
+		Number(activeSet?.score_player1) >= 50 ||
+		Number(activeSet?.score_player2) >= 50;
+
+	  if (finished) {
+		// last throw was in a finished set → next set not started yet
+		window.scoringMatch.currentSetNumber = activeSetNum + 1;
+		window.scoringCurrentSetId = null;
+		window.scoringCurrentSetSP1 = 0;
+		window.scoringCurrentSetSP2 = 0;
+		window.scoringCurrentThrower = null;
+		} else {
+		  // active unfinished set
+		  const derivedThrower =
+			activeSet?.current_thrower ||
+			(lastThrow.side === "p1" ? "p2" : "p1");
+
+		  // ✅ THIS is the missing piece: bind currentSet so later code doesn't wipe state
+		  currentSet = {
+			id: activeSetId,
+			set_number: activeSetNum,
+			score_player1: Number(activeSet?.score_player1) || 0,
+			score_player2: Number(activeSet?.score_player2) || 0,
+			current_thrower: derivedThrower
+		  };
+
+		  // keep your existing window state writes (fine)
+		  window.scoringMatch.currentSetNumber = activeSetNum;
+		  window.scoringCurrentSetId = activeSetId;
+		  window.scoringCurrentSetSP1 = currentSet.score_player1;
+		  window.scoringCurrentSetSP2 = currentSet.score_player2;
+		  window.scoringCurrentThrower = derivedThrower;
 		}
 	}
 
 	if (currentSet) {
-		scoringCurrentSetId = currentSet.id;
-		scoringCurrentSetSP1 = currentSet.score_player1 || 0;
-		scoringCurrentSetSP2 = currentSet.score_player2 || 0;
-		scoringCurrentThrower = currentSet.current_thrower;
-		scoringMatch.currentSetNumber = currentSet.set_number;
+		window.scoringCurrentSetId = currentSet.id;
+		window.scoringCurrentSetSP1 = currentSet.score_player1 || 0;
+		window.scoringCurrentSetSP2 = currentSet.score_player2 || 0;
+		window.scoringCurrentThrower = currentSet.current_thrower;
+		window.scoringMatch.currentSetNumber = currentSet.set_number;
 	} else {
-		const maxSet = sets.length
-			? Math.max(...sets.map(s => s.set_number || 0))
+		const maxSet = (effectiveSets || []).length
+			? Math.max(...(effectiveSets || []).map(s => s.set_number || 0))
 			: 0;
-		scoringMatch.currentSetNumber = maxSet + 1;
-		scoringCurrentSetId = null;
-		scoringCurrentSetSP1 = 0;
-		scoringCurrentSetSP2 = 0;
-		scoringCurrentThrower = null;
+		window.scoringMatch.currentSetNumber = maxSet + 1;
+		window.scoringCurrentSetId = null;
+		window.scoringCurrentSetSP1 = 0;
+		window.scoringCurrentSetSP2 = 0;
+		window.scoringCurrentThrower = null;
 	}
 	
 	if (currentSet && scoringMatch.isTeamMatch) {
@@ -288,18 +354,38 @@ async function resetScoringStateForMatch(match, sets) {
 	  }
 	}
 
-	scoringThrowHistory = [];
-	scoringConsecutiveMisses = { p1: 0, p2: 0 };
-
 	updateScoringHeaderUI();
 	updateStartSetVisibility();
 	syncStartSetUI();
 	syncTeamLineupsUI();
 	
 	wireEndMatchButton();
+	  
+	scoringConsecutiveMisses = { p1: 0, p2: 0 };
+	scoringThrowHistory = [];
 }
 
 window.resetScoringStateForMatch = resetScoringStateForMatch;
+
+async function rebuildLocalThrowStateFromDB(matchId, setNumber) {
+  const { data: throws } = await window.supabaseClient
+    .from("throws")
+    .select("side, score, is_miss, is_fault")
+    .eq("match_id", matchId)
+    .eq("set_number", setNumber)
+    .order("throw_number");
+
+  scoringThrowHistory = (throws || []).map(t => ({
+    player: t.side,
+    score: Number(t.score) || 0,
+    isMiss: t.is_miss === true || Number(t.score) === 0,
+    isFault: t.is_fault === true
+  }));
+
+  window.scoringConsecutiveMisses =
+    recomputeConsecutiveMissesFromThrows(throws || []);
+}
+
 
 // -----------------------------------------------------------
 // START SET OVERLAY
@@ -350,10 +436,24 @@ async function scoringStartSet(firstThrower) {
 	  scoringMatch.currentSetNumber,
 	  firstThrower   // 👈 SET IT HERE
 	);
+	
+	// After dbGetOrCreateSet returns setRow
+	if (!setRow?.id) {
+	  console.error("[startSet] no setRow returned");
+	  return;
+	}
 
-	// 🔑 IMMEDIATELY update local state
-	scoringCurrentSetId = setRow.id;
-	scoringCurrentThrower = firstThrower;
+	// ✅ Authoritative local state so UI + scoring works immediately
+	window.scoringCurrentSetId = setRow.id;
+	window.scoringCurrentThrower = firstThrower;
+
+	window.scoringCurrentSetSP1 = setRow.score_player1 ?? 0;
+	window.scoringCurrentSetSP2 = setRow.score_player2 ?? 0;
+
+	// If you always start a new set at 0–0, force it here:
+	window.scoringCurrentSetSP1 = 0;
+	window.scoringCurrentSetSP2 = 0;
+
 
 	// Ensure side indices are aligned
 	if (scoringMatch.isTeamMatch && scoringMatch.sideModel?.[firstThrower]) {
@@ -412,23 +512,10 @@ async function scoringStartSet(firstThrower) {
 			scoringMatch.sideModel[firstThrower].currentIndex = 0;
 		}
 
-	scoringCurrentSetId = setRow.id;
-	scoringCurrentThrower = firstThrower;
-	if (scoringMatch.isTeamMatch) {
-		scoringMatch.sideModel.p1.lineup = [...window.currentSetLineups.p1];
-		scoringMatch.sideModel.p2.lineup = [...window.currentSetLineups.p2];
-		scoringMatch.sideModel.p1.currentIndex = 0;
-		scoringMatch.sideModel.p2.currentIndex = 0;
-	}
-	scoringCurrentSetSP1 = setRow.score_player1 || 0;
-	scoringCurrentSetSP2 = setRow.score_player2 || 0;
-	scoringThrowHistory = [];
-
 	updateStartSetVisibility();
-	updateScoringHeaderUI();
-	syncHeaderTikku();
 	syncTeamLineupsUI();
-	renderTeamLineups(window.scoringMatch);
+	
+	await syncScoringStateFromDB(setRow.id);
 }
 
 window.scoringStartSet = scoringStartSet;
@@ -438,73 +525,47 @@ window.scoringStartSet = scoringStartSet;
 // -----------------------------------------------------------
 
 async function scoringAddScore(score, opts = {}) {
-	if (!scoringMatch || !scoringCurrentSetId) return;
+  if (!window.scoringMatch || !window.scoringCurrentSetId) return;
 
-	const isMiss = score === 0;
-	const isFault = opts.isFault === true;
-	const isP1 = scoringCurrentThrower === "p1";
-	const playerKey = isP1 ? "p1" : "p2";
+  const isMiss = score === 0;
+  const isFault = opts.isFault === true;
+  const isP1 = window.scoringCurrentThrower === "p1";
+  const playerKey = isP1 ? "p1" : "p2";
 
-	if (isMiss) {
-		scoringConsecutiveMisses[playerKey]++;
-	} else {
-		scoringConsecutiveMisses[playerKey] = 0;
-	}
+  // Insert throw (DB is source of truth)
+  window.__localThrowInFlight = true;
+  await dbInsertThrow({
+    matchId: window.scoringMatch.matchId,
+    setId: window.scoringCurrentSetId,
+    setNumber: window.scoringMatch.currentSetNumber,
+	throwerSide: window.scoringCurrentThrower,
+    playerId: getCurrentThrowerPlayerId(),
+    score,
+    isMiss,
+    isFault
+  });
+  window.__localThrowInFlight = false;
 
-	if (isP1) {
-		scoringCurrentSetSP1 = applyScore(scoringCurrentSetSP1, score, isFault);
-	} else {
-		scoringCurrentSetSP2 = applyScore(scoringCurrentSetSP2, score, isFault);
-	}
+  // Recalculate small points (derived)
+  await recalcMatchSmallPoints(scoringMatch.matchId);
 
-	const throwNumber =
-		(await window.supabaseClient
-			.from("throws")
-			.select("id")
-			.eq("match_id", scoringMatch.matchId)
-			.eq("set_number", scoringMatch.currentSetNumber)
-		).data.length + 1;
+  // Three-miss loss ends the set
+  if (await checkThreeMissLoss(playerKey)) {
+    return;
+  }
 
-	await dbInsertThrow({
-		matchId: scoringMatch.matchId,
-		setId: scoringCurrentSetId,
-		setNumber: scoringMatch.currentSetNumber,
-		throwNumber,
-		playerId: getCurrentThrowerPlayerId(),
-		score,
-		isMiss,
-		isFault
-	});
+  // Normal set win ends the set
+  if (await checkSetWin()) {
+    return;
+  }
 
-	// After inserting the throw and recalcing SP:
-	await recalcMatchSmallPoints(scoringMatch.matchId);
+  // 🔑 AUTHORITATIVE REBUILD FROM DB
+  // This keeps Browser A in sync with Browser B
+  await syncScoringStateFromDB(window.scoringCurrentSetId);
 
-	if (await checkThreeMissLoss(playerKey)) return;
-
-	// Existing logic
-	if (await checkSetWin()) return;
-
-	advanceThrowerWithinSide(scoringCurrentThrower);
-
-	// Flip thrower FIRST
-	scoringCurrentThrower = isP1 ? "p2" : "p1";
-	
-	syncTeamLineupsUI();
-
-	// Persist scores + NEXT thrower
-	await dbUpdateLiveSetScore({
-		matchId: scoringMatch.matchId,
-		setNumber: scoringMatch.currentSetNumber,
-		p1: scoringCurrentSetSP1,
-		p2: scoringCurrentSetSP2,
-		thrower: scoringCurrentThrower
-	});
-
-	updateScoringHeaderUI();
-	syncThrowstripUI();
-	syncHeaderTikku();
-	updateLiveThrowsForSet(scoringMatch.currentSetNumber);
-	renderTeamLineups(window.scoringMatch);
+  // 🔁 Ensure UI reflects rebuilt state
+  syncTeamLineupsUI?.();
+  syncHeaderTikku();
 }
 
 function applyScore(before, score, isFault) {
@@ -515,161 +576,63 @@ function applyScore(before, score, isFault) {
 	return next > 50 ? 25 : next;
 }
 
-async function checkThreeMissLoss(playerKey) {
-	if (scoringConsecutiveMisses[playerKey] < 3) return false;
+function rebuildSetStateFromThrows(throws) {
+  let sp1 = 0;
+  let sp2 = 0;
 
-	const losingSide = playerKey;
-	const winningSide = playerKey === "p1" ? "p2" : "p1";
+  // consecutive misses at end-of-sequence per side
+  const misses = { p1: 0, p2: 0 };
 
-	let winnerId = null;
+  // next thrower is the side of the next throw to be taken
+  // if there are throws, it's the opposite of the last throw's side
+  let nextThrower = "p1";
 
-	if (scoringMatch.isTeamMatch) {
-	  winnerId = getLastThrowerPlayerId(winningSide);
-	} else {
-	  winnerId = winningSide === "p1"
-		? scoringMatch.p1Id
-		: scoringMatch.p2Id;
-	}
+  const arr = Array.isArray(throws) ? throws : [];
 
-	if (!winnerId) {
-	  console.error("[three-miss] could not resolve winning player");
-	  return false;
-	}
-	
-	// FORCE 50–0 score on three-miss loss
-	const loserIsP1 = playerKey === "p1";
+  // 1) Rebuild cumulative scores from recorded side + fault/miss flags
+  for (const t of arr) {
+    const side = t.side;
+    if (side !== "p1" && side !== "p2") continue;
 
-	scoringCurrentSetSP1 = loserIsP1 ? 0 : 50;
-	scoringCurrentSetSP2 = loserIsP1 ? 50 : 0;
+    const score = Number(t.score) || 0;
+    const isFault = t.is_fault === true;
 
-	// Persist set result
-	const { error: setErr } = await window.supabaseClient
-		.from("sets")
-		.update({
-			score_player1: scoringCurrentSetSP1,
-			score_player2: scoringCurrentSetSP2,
-			winner_player_id: winnerId,
-			current_thrower: null
-		})
-		.eq("id", scoringCurrentSetId);
-
-	if (setErr) {
-		console.error("[three-miss] failed to update set", setErr);
-		return false;
-	}
-
-	// Update match set count
-	if (winnerId === scoringMatch.p1Id) scoringMatch.setsP1++;
-	if (winnerId === scoringMatch.p2Id) scoringMatch.setsP2++;
-
-	await window.supabaseClient
-		.from("matches")
-		.update({
-			final_sets_player1: scoringMatch.setsP1,
-			final_sets_player2: scoringMatch.setsP2
-		})
-		.eq("id", scoringMatch.matchId);
-
-	// Advance to next set
-	scoringMatch.currentSetNumber++;
-	scoringCurrentSetId = null;
-	scoringCurrentSetSP1 = 0;
-	scoringCurrentSetSP2 = 0;
-	scoringCurrentThrower = null;
-	scoringConsecutiveMisses = { p1: 0, p2: 0 };
-
-	await recalcMatchSmallPoints(scoringMatch.matchId);
-
-	updateScoringHeaderUI();
-	syncStartSetUI();
-	updateStartSetVisibility();
-
-	return true;
-}
-
-function getLastThrowerPlayerId(sideKey) {
-  const side = scoringMatch.sideModel?.[sideKey];
-  if (!side || side.type !== "team") return null;
-
-  if (!Array.isArray(side.lineup) || side.lineup.length === 0) return null;
-
-  return side.lineup[side.currentIndex];
-}
-
-// -----------------------------------------------------------
-// SET WIN
-// -----------------------------------------------------------
-
-async function checkSetWin() {
-  let winningSide = null;
-
-  // 1️⃣ Detect a winning condition (SIDE, not ID)
-  if (scoringCurrentSetSP1 === 50 && scoringCurrentSetSP2 < 50) {
-    winningSide = "p1";
-  } else if (scoringCurrentSetSP2 === 50 && scoringCurrentSetSP1 < 50) {
-    winningSide = "p2";
+    if (side === "p1") sp1 = applyScore(sp1, score, isFault);
+    else sp2 = applyScore(sp2, score, isFault);
   }
 
-  if (!winningSide) return false;
-
-  // 2️⃣ Resolve the ACTUAL PLAYER who won the set
-  const winningPlayerId = scoringMatch.isTeamMatch
-    ? getCurrentThrowerPlayerId()
-    : scoringMatch[`${winningSide}Id`];
-
-  if (!winningPlayerId) {
-    console.error("[checkSetWin] No winning player could be resolved");
-    return false;
+  // 2) Next thrower
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const side = arr[i]?.side;
+    if (side === "p1" || side === "p2") {
+      nextThrower = side === "p1" ? "p2" : "p1";
+      break;
+    }
   }
 
-  // 3️⃣ Persist set result (PLAYER id only — FK-safe)
-  const { error: setErr } = await window.supabaseClient
-    .from("sets")
-    .update({
-      score_player1: scoringCurrentSetSP1,
-      score_player2: scoringCurrentSetSP2,
-      winner_player_id: winningPlayerId,
-      current_thrower: null
-    })
-    .eq("id", scoringCurrentSetId);
+  // 3) Consecutive misses from the tail (per side)
+  const done = { p1: false, p2: false };
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const t = arr[i];
+    const side = t?.side;
+    if (side !== "p1" && side !== "p2") continue;
+    if (done[side]) continue;
 
-  if (setErr) {
-    console.error("[checkSetWin] failed to update set", setErr);
-    return false;
+    const missLike = t.is_miss === true || Number(t.score) === 0;
+    if (missLike) misses[side] += 1;
+    else done[side] = true;
+
+    if (done.p1 && done.p2) break;
   }
 
-  // 4️⃣ Update local match set counters
-  if (winningSide === "p1") scoringMatch.setsP1++;
-  if (winningSide === "p2") scoringMatch.setsP2++;
+	const throwHistory = arr.map(t => ({
+	  player: t.side,
+	  score: Number(t.score) || 0,
+	  isMiss: t.is_miss === true || Number(t.score) === 0,
+	  isFault: t.is_fault === true
+	}));
 
-  const { error: matchErr } = await window.supabaseClient
-    .from("matches")
-    .update({
-      final_sets_player1: scoringMatch.setsP1,
-      final_sets_player2: scoringMatch.setsP2
-    })
-    .eq("id", scoringMatch.matchId);
-
-  if (matchErr) {
-    console.error("[checkSetWin] failed to update match", matchErr);
-  }
-
-  // 5️⃣ Advance local state
-  scoringMatch.currentSetNumber++;
-  scoringCurrentSetId = null;
-  scoringCurrentSetSP1 = 0;
-  scoringCurrentSetSP2 = 0;
-  scoringCurrentThrower = null;
-  scoringConsecutiveMisses = { p1: 0, p2: 0 };
-
-  await recalcMatchSmallPoints(scoringMatch.matchId);
-
-  updateScoringHeaderUI();
-  syncStartSetUI();
-  updateStartSetVisibility();
-  syncHeaderTikku();
-
-  return true;
+	return { sp1, sp2, nextThrower, misses, throwHistory };
 }
 
 function initScoringButtons() {
@@ -714,6 +677,32 @@ function initScoringButtons() {
 	container.appendChild(actions);
 }
 
+function recomputeConsecutiveMissesFromThrows(throws) {
+  const misses = { p1: 0, p2: 0 };
+  const done = { p1: false, p2: false };
+
+  for (let i = (throws?.length || 0) - 1; i >= 0; i--) {
+    const t = throws[i];
+    const side = t.side;
+
+    if (side !== "p1" && side !== "p2") continue;
+    if (done[side]) continue;
+
+    const isMissLike =
+      t.is_miss === true ||
+      Number(t.score) === 0;
+
+    if (isMissLike) {
+      misses[side]++;
+    } else {
+      done[side] = true;
+      if (done.p1 && done.p2) break;
+    }
+  }
+
+  return misses;
+}
+
 async function recalcMatchSmallPoints(matchId) {
 	if (!matchId) return;
 
@@ -747,7 +736,6 @@ async function recalcMatchSmallPoints(matchId) {
 	// 🔑 THIS is what you were missing
 	updateMatchSPUI(sp1, sp2);
 }
-
 
 async function scoringUndo() {
 	if (!scoringMatch) return;
@@ -808,113 +796,135 @@ async function scoringUndo() {
 
 	// 4. Load remaining throws for this set
 	const { data: remainingThrows, error: remErr } = await window.supabaseClient
-		.from("throws")
-		.select("*")
-		.eq("match_id", matchId)
-		.eq("set_number", setNumber)
-		.order("throw_number", { ascending: true });
+	  .from("throws")
+	  .select("*")
+	  .eq("match_id", matchId)
+	  .eq("set_number", setNumber)
+	  .order("throw_number", { ascending: true });
+
+	if (remErr) {
+	  console.error("Undo: failed to load remaining throws:", remErr);
+	  return;
+	}
+
+	// --------------------------------------------------
+	// CASE: first throw undone → abandon the set
+	// --------------------------------------------------
+	if ((remainingThrows || []).length === 0) {
+
+	  await window.supabaseClient
+		.from("sets")
+		.delete()
+		.eq("id", setId);
+
+	  window.scoringCurrentSetId = null;
+	  window.scoringCurrentThrower = null;
+	  window.scoringCurrentSetSP1 = 0;
+	  window.scoringCurrentSetSP2 = 0;
+
+	  scoringMatch.currentSetNumber =
+		Math.max(1, scoringMatch.currentSetNumber - 1);
+
+	  updateScoringHeaderUI();
+	  syncLiveSetScoreUI();
+	  updateStartSetVisibility();
+	  syncHeaderTikku();
+
+	  return;
+	}
+
+	const rebuilt = rebuildSetStateFromThrows(remainingThrows || []);
+
+	let newSP1 = rebuilt.sp1;
+	let newSP2 = rebuilt.sp2;
+	let nextThrower = rebuilt.nextThrower;
 
 	if (remErr) {
 		console.error("Undo: failed to load remaining throws:", remErr);
 		return;
 	}
 
-	// 5. Rebuild scores using the same model as display logic
-	const p1Id = scoringMatch?.p1Id || setRow.player1_id || lastThrow.player1_id;
-	const p2Id = scoringMatch?.p2Id || setRow.player2_id || lastThrow.player2_id;
-
-	const model = (typeof buildThrowsModel === "function")
-		? buildThrowsModel(remainingThrows || [], p1Id, p2Id)
-		: [];
-
-	let newSP1 = 0;
-	let newSP2 = 0;
-	let nextThrower = "p1";
-
-	if (model.length > 0) {
-		const last = model[model.length - 1];
-		newSP1 = last.cumP1;
-		newSP2 = last.cumP2;
-		nextThrower = last.isP1 ? "p2" : "p1";
-	} else {
-		// No throws left in this set -> reset scores, fallback to p1
-		newSP1 = 0;
-		newSP2 = 0;
-		nextThrower = "p1";
-	}
-
-	// 6. Determine new winner for the set
-	let newWinnerId = null;
-	if (newSP1 === 50 && newSP2 < 50) {
-		newWinnerId = p1Id;
-	} else if (newSP2 === 50 && newSP1 < 50) {
-		newWinnerId = p2Id;
-	}
-
-	// 7. Update set row
+	// 7. Update set row (UNDO: winner can only be cleared)
 	const { error: updSetErr } = await window.supabaseClient
-		.from("sets")
-		.update({
-			score_player1: newSP1,
-			score_player2: newSP2,
-			current_thrower: nextThrower,
-			winner_player_id: newWinnerId
-		})
-		.eq("id", setId);
+	  .from("sets")
+	  .update({
+		score_player1: newSP1,
+		score_player2: newSP2,
+		current_thrower: nextThrower,
+		winner_player_id: null
+	  })
+	  .eq("id", setId);
 
-	if (updSetErr) {
-		console.error("Undo: failed to update set:", updSetErr);
-	}
+	// 8. If the set previously had a winner, remove exactly one match-level set win
+	if (prevWinner) {
+	  const { data: matchRow, error: mErr } = await window.supabaseClient
+		.from("matches")
+		.select(
+		  "id, final_sets_player1, final_sets_player2, team1_id, team2_id, player1_id, player2_id"
+		)
+		.eq("id", matchId)
+		.maybeSingle();
 
-	// 8. If winner changed, adjust match final set scores
-	if (prevWinner !== newWinnerId) {
-		const { data: matchRow, error: mErr } = await window.supabaseClient
-			.from("matches")
-			.select("id, player1_id, player2_id, final_sets_player1, final_sets_player2")
-			.eq("id", matchId)
-			.maybeSingle();
+	  if (!mErr && matchRow) {
+		let setsP1 = matchRow.final_sets_player1 ?? 0;
+		let setsP2 = matchRow.final_sets_player2 ?? 0;
 
-		if (!mErr && matchRow) {
-			let setsP1 = matchRow.final_sets_player1 ?? 0;
-			let setsP2 = matchRow.final_sets_player2 ?? 0;
+		const isTeamMatch = Boolean(matchRow.team1_id || matchRow.team2_id);
 
-			const mp1 = matchRow.player1_id;
-			const mp2 = matchRow.player2_id;
-
-			// remove previous winner
-			if (prevWinner === mp1) setsP1 = Math.max(0, setsP1 - 1);
-			if (prevWinner === mp2) setsP2 = Math.max(0, setsP2 - 1);
-
-			// add new winner (if any)
-			if (newWinnerId === mp1) setsP1++;
-			if (newWinnerId === mp2) setsP2++;
-
-			await window.supabaseClient
-				.from("matches")
-				.update({
-					final_sets_player1: setsP1,
-					final_sets_player2: setsP2
-				})
-				.eq("id", matchId);
-		
-		await recalcMatchSmallPoints(scoringMatch.matchId);
-
-			// also update local scoringMatch
-			scoringMatch.setsP1 = setsP1;
-			scoringMatch.setsP2 = setsP2;
-
-			if (typeof updateOverallMatchScore === "function") {
-				await updateOverallMatchScore();
-			}
+		if (isTeamMatch) {
+		  // Determine which team the winning PLAYER belonged to
+		  if (
+			window.currentTeamMembers?.some(
+			  m => m.player_id === prevWinner && m.team_id === matchRow.team1_id
+			)
+		  ) {
+			setsP1 = Math.max(0, setsP1 - 1);
+		  } else if (
+			window.currentTeamMembers?.some(
+			  m => m.player_id === prevWinner && m.team_id === matchRow.team2_id
+			)
+		  ) {
+			setsP2 = Math.max(0, setsP2 - 1);
+		  }
+		} else {
+		  if (prevWinner === matchRow.player1_id) {
+			setsP1 = Math.max(0, setsP1 - 1);
+		  } else if (prevWinner === matchRow.player2_id) {
+			setsP2 = Math.max(0, setsP2 - 1);
+		  }
 		}
+
+		await window.supabaseClient
+		  .from("matches")
+		  .update({
+			final_sets_player1: setsP1,
+			final_sets_player2: setsP2
+		  })
+		  .eq("id", matchId);
+
+		// keep derived values correct
+		await recalcMatchSmallPoints(matchId);
+	  }
+	}
+	
+	const { data: freshMatch, error: fmErr } = await window.supabaseClient
+	  .from("matches")
+	  .select("final_sets_player1, final_sets_player2")
+	  .eq("id", matchId)
+	  .maybeSingle();
+
+	if (!fmErr && freshMatch) {
+	  scoringMatch.setsP1 = freshMatch.final_sets_player1 ?? 0;
+	  scoringMatch.setsP2 = freshMatch.final_sets_player2 ?? 0;
+	}
+	
+	if (typeof App?.Features?.Match?.refreshMatchHeader === "function") {
+		App.Features.Match.refreshMatchHeader();
 	}
 
 	// 9. Update local JS state for current set
 	scoringMatch.currentSetNumber = setNumber;
-	scoringCurrentSetId = setId;
-	scoringCurrentSetSP1 = newSP1;
-	scoringCurrentSetSP2 = newSP2;
-	scoringCurrentThrower = nextThrower;
+	window.scoringCurrentSetId = setId;
 	
 	// Team matches: recompute which player is "next" for each side
 	if (scoringMatch?.isTeamMatch) {
@@ -940,44 +950,10 @@ async function scoringUndo() {
 	  }
 	}
 
-	// Rebuild in-memory throwHistory from remainingThrows
-	scoringThrowHistory = (remainingThrows || []).map((t) => {
-		const isP1Throw = t.player_id === p1Id;
-		const raw = t.score ?? 0;
-		const isMiss = t.is_miss || raw === 0;
-		const isFault = t.is_fault || false;
-		return {
-			player: isP1Throw ? "p1" : "p2",
-			score: raw,
-			isMiss,
-			isFault
-		};
-	});
-
 // 10. Update scoring console UI (state-driven)
-	if (typeof syncLiveSetScoreUI === "function") {
-		syncLiveSetScoreUI();
-	}
-
-	if (typeof syncThrowstripUI === "function") {
-		syncThrowstripUI();
-	}
-
-	if (typeof updateScoringHeaderUI === "function") {
-		updateScoringHeaderUI();
-	}
-
-	// 11. Refresh live throw view (header + set row)
-	if (typeof updateLiveThrowsForSet === "function") {
-		updateLiveThrowsForSet(setNumber);
-	}
-
-	// 12. If we just undid the only scoring throw that gave someone 50,
-	//		 we might need to hide the start-next-set overlay.
-	updateStartSetVisibility();
+	await syncScoringStateFromDB(setId); // use the setId you already have, not window-scoped
 	
-	renderTeamLineups(window.scoringMatch);
-	syncHeaderTikku();
+	updateStartSetVisibility();
 }
 
 async function scoringEndMatch() {
@@ -1290,38 +1266,207 @@ function updateScoringHeaderUI() {
 					? scoringMatch.p1Name
 					: scoringMatch.p2Name) + " to throw"
 			: "–";
+			
+	// -----------------------------
+	// Miss counter (debug + UI)
+	// -----------------------------
+	const missElP1 = document.getElementById("scoring-p1-misses");
+	const missElP2 = document.getElementById("scoring-p2-misses");
+
+	function renderMisses(el, count) {
+		if (!el) return;
+
+		if (!count || count < 1) {
+			el.textContent = "";
+			el.classList.add("hidden");
+			return;
+		}
+
+		el.textContent = Array(count).fill("X").join(" ");
+		el.classList.remove("hidden");
+	}
+
+	renderMisses(
+		missElP1,
+		window.scoringConsecutiveMisses?.p1 ?? 0
+	);
+
+	renderMisses(
+		missElP2,
+		window.scoringConsecutiveMisses?.p2 ?? 0
+	);
 	
 	syncHeaderTikku()
 }
 
-function syncThrowstripUI() {
-	const p1Strip = document.getElementById("header-throws-p1");
-	const p2Strip = document.getElementById("header-throws-p2");
-	if (!p1Strip || !p2Strip) return;
+function deriveTeamRotationFromThrows(throwsArr) {
+  const match = window.scoringMatch;
+  const p1Lineup = match?.sideModel?.p1?.lineup || [];
+  const p2Lineup = match?.sideModel?.p2?.lineup || [];
 
-	p1Strip.innerHTML = "";
-	p2Strip.innerHTML = "";
+  const arrRaw = Array.isArray(throwsArr) ? throwsArr : [];
+  const arr = [...arrRaw].filter(t => Number(t?.throw_number) > 0);
 
-	const startSide = scoringCurrentThrower
-		? scoringCurrentThrower
-		: "p1"; // fallback, should rarely be used
+  if (!match?.isTeamMatch || !p1Lineup.length || !p2Lineup.length) {
+    return { nextSide: null, p1Index: 0, p2Index: 0 };
+  }
 
-	scoringThrowHistory.forEach((t, idx) => {
-		const el = document.createElement("span");
-		el.className = "throw-pill";
-		el.textContent = t.isFault ? "F" : t.isMiss ? "–" : t.score;
+  if (arr.length === 0) {
+    return { nextSide: null, p1Index: 0, p2Index: 0 };
+  }
 
-		// Determine side based on start side + parity
-		const isEven = idx % 2 === 1;
-		const side =
-			startSide === "p1"
-				? (isEven ? "p2" : "p1")
-				: (isEven ? "p1" : "p2");
+  // Sort by throw_number
+  arr.sort((a, b) => Number(a.throw_number) - Number(b.throw_number));
 
-		if (side === "p1") p1Strip.appendChild(el);
-		else p2Strip.appendChild(el);
-	});
+  const other = (s) => (s === "p1" ? "p2" : "p1");
+
+  // Try to map a throw to a side using explicit side or player_id membership
+  function sideFromRow(t) {
+    if (t?.side === "p1" || t?.side === "p2") return t.side;
+    const pid = t?.player_id;
+    if (!pid) return null;
+    if (p1Lineup.includes(pid)) return "p1";
+    if (p2Lineup.includes(pid)) return "p2";
+    return null;
+  }
+
+  // Determine starting side using throw #1 if present
+  let startSide = null;
+  const t1 = arr.find(t => Number(t.throw_number) === 1) || arr[0];
+  startSide = sideFromRow(t1);
+
+  // If still unknown, pick a sane default (but parity will still work)
+  if (startSide !== "p1" && startSide !== "p2") {
+    startSide = "p1";
+  }
+
+  // Now we can derive a side for EVERY throw deterministically:
+  // odd throw_number => startSide, even => other(startSide)
+  function canonicalSide(t) {
+    const n = Number(t.throw_number) || 0;
+    const explicit = sideFromRow(t);
+    if (explicit === "p1" || explicit === "p2") return explicit;
+    return (n % 2 === 1) ? startSide : other(startSide);
+  }
+
+  // Count throws by canonical side
+  let p1Throws = 0;
+  let p2Throws = 0;
+  let maxN = 0;
+
+  for (const t of arr) {
+    const n = Number(t.throw_number) || 0;
+    if (n > maxN) maxN = n;
+
+    const s = canonicalSide(t);
+    if (s === "p1") p1Throws++;
+    else if (s === "p2") p2Throws++;
+  }
+
+  // Next side is opposite of the side who took throw maxN
+  // (equivalently: if maxN even => nextSide = startSide; odd => other)
+  const nextSide = (maxN % 2 === 0) ? startSide : other(startSide);
+
+  const p1Index = p1Throws % p1Lineup.length;
+  const p2Index = p2Throws % p2Lineup.length;
+
+  return { nextSide, p1Index, p2Index };
 }
+
+function syncThrowstripUI() {
+  const p1Strip = document.getElementById("header-throws-p1");
+  const p2Strip = document.getElementById("header-throws-p2");
+  if (!p1Strip || !p2Strip) return;
+
+  const history = Array.isArray(window.scoringThrowHistory)
+    ? window.scoringThrowHistory
+    : [];
+
+  p1Strip.innerHTML = "";
+  p2Strip.innerHTML = "";
+
+  if (history.length === 0) return;
+
+  history.forEach(t => {
+    const el = document.createElement("span");
+    el.className = "throw-box";
+    el.textContent = t.isFault ? "F" : t.isMiss ? "–" : t.score;
+
+    if (t.player === "p1") p1Strip.appendChild(el);
+    else p2Strip.appendChild(el);
+  });
+}
+
+async function syncScoringStateFromDB(setId) {
+  if (!setId || !window.supabaseClient) return;
+
+  // 1) Load authoritative set row (scores + thrower are DB-led)
+  const { data: setRow, error: setErr } = await window.supabaseClient
+    .from("sets")
+    .select("id, match_id, set_number, score_player1, score_player2, current_thrower, winner_player_id")
+    .eq("id", setId)
+    .maybeSingle();
+
+  if (setErr || !setRow) {
+    console.error("[syncScoringStateFromDB] failed to load set row", setErr);
+    return;
+  }
+
+  // 2) Load authoritative throws for this set
+  const { data: throws, error: thrErr } = await window.supabaseClient
+    .from("throws")
+    .select("*")
+    .eq("set_id", setId)
+    .order("throw_number", { ascending: true });
+
+  if (thrErr) {
+    console.error("[syncScoringStateFromDB] failed to load throws", thrErr);
+    return;
+  }
+
+	// --- after you have: setRow, throws[], and (for team matches) sideModel.p1.lineup / sideModel.p2.lineup populated
+
+	const arr = Array.isArray(throws) ? throws : [];
+
+	// Scores are DB-led
+	window.scoringCurrentSetSP1 = Number(setRow.score_player1) || 0;
+	window.scoringCurrentSetSP2 = Number(setRow.score_player2) || 0;
+
+	// Active set identity
+	window.scoringCurrentSetId = setRow.id;
+	window.scoringMatch.currentSetNumber = setRow.set_number;
+
+	// --- TEAM MATCH ROTATION (AUTHORITATIVE) ---
+	if (window.scoringMatch?.isTeamMatch) {
+	  const rot = deriveTeamRotationFromThrows(arr);
+
+	  window.scoringMatch.sideModel.p1.currentIndex = rot.p1Index ?? 0;
+	  window.scoringMatch.sideModel.p2.currentIndex = rot.p2Index ?? 0;
+
+	  window.scoringCurrentThrower = rot.nextSide ?? null;
+	} else {
+	  // Singles: fall back to DB
+	  window.scoringCurrentThrower = setRow.current_thrower || null;
+	}
+
+	// Misses + history
+	window.scoringConsecutiveMisses =
+	  recomputeConsecutiveMissesFromThrows(arr);
+
+	window.scoringThrowHistory = arr.map(t => ({
+	  player: (t.side === "p2" ? "p2" : "p1"),
+	  score: Number(t.score) || 0,
+	  isMiss: t.is_miss === true || Number(t.score) === 0,
+	  isFault: t.is_fault === true
+	}));
+
+	// UI refresh (single authoritative redraw)
+	updateScoringHeaderUI();
+	syncLiveSetScoreUI();
+	syncTeamLineupsUI?.();
+	syncHeaderTikku();
+}
+
 
 // -----------------------------------------------------------
 // EXPORTS

@@ -40,8 +40,24 @@ App.Features.Match.renderMatchSets = function (
     const p1Score = s.score_player1 ?? "";
     const p2Score = s.score_player2 ?? "";
 
-    const p1Win = s.winner_player_id === p1Id;
-    const p2Win = s.winner_player_id === p2Id;
+	let p1Win = false;
+	let p2Win = false;
+
+	if (s.winner_player_id) {
+	  // Singles
+	  if (p1Id === s.winner_player_id) p1Win = true;
+	  if (p2Id === s.winner_player_id) p2Win = true;
+
+	  // Teams
+	  if (window.currentTeamMembers?.length) {
+		const winnerTeam = window.currentTeamMembers.find(
+		  m => m.player_id === s.winner_player_id
+		)?.team_id;
+
+		if (winnerTeam === p1Id) p1Win = true;
+		if (winnerTeam === p2Id) p2Win = true;
+	  }
+	}
 
     if (p1Win) cumP1++;
     if (p2Win) cumP2++;

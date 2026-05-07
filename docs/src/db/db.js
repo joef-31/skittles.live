@@ -7,27 +7,27 @@
  *
  * Requires `current_thrower` text column on `sets` (can be NULL).
  */
-async function dbUpdateLiveSetScore({ matchId, setNumber, p1, p2, thrower }) {
-  const patch = {
-    score_player1: p1,
-    score_player2: p2,
-  };
-
-  if (typeof thrower === "string" && thrower.length > 0) {
-    patch.current_thrower = thrower;
-  }
-
-  const { data, error } = await supabaseClient
+async function dbUpdateLiveSetScore({
+  matchId,
+  setNumber,
+  p1,
+  p2,
+  thrower
+}) {
+  const { error } = await supabaseClient
     .from("sets")
-    .update(patch)
+    .update({
+      score_player1: p1,
+      score_player2: p2,
+      current_thrower: thrower
+    })
     .eq("match_id", matchId)
-    .eq("set_number", setNumber);
+    .eq("set_number", setNumber)
+    .is("winner_player_id", null);
 
   if (error) {
-    console.error("dbUpdateLiveSetScore error:", error);
+    console.error("[dbUpdateLiveSetScore] failed", error);
   }
-
-  return { data, error };
 }
 
 /**
@@ -52,21 +52,22 @@ async function dbGetSet(matchId, setNumber) {
  * Get or create a set row for (matchId, setNumber).
  * Used so throws always have a valid set_id.
  */
-async function dbGetOrCreateSet(matchId, setNumber) {
+async function dbGetOrCreateSet(matchId, setNumber, firstThrower = null) {
+  const upsertRow = {
+    match_id: matchId,
+    set_number: setNumber,
+    score_player1: 0,
+    score_player2: 0,
+    winner_player_id: null
+  };
+
+  if (firstThrower) {
+    upsertRow.current_thrower = firstThrower;
+  }
+
   const { data, error } = await supabaseClient
     .from("sets")
-    .upsert(
-      {
-        match_id: matchId,
-        set_number: setNumber,
-        score_player1: 0,
-        score_player2: 0,
-        winner_player_id: null,
-      },
-      {
-        onConflict: "match_id,set_number",
-      }
-    )
+    .upsert(upsertRow, { onConflict: "match_id,set_number" })
     .select("*")
     .single();
 
@@ -77,7 +78,6 @@ async function dbGetOrCreateSet(matchId, setNumber) {
 
   return { data, error: null };
 }
-
 
 /**
  * Insert one throw, with correct set_id + set_number.
@@ -96,31 +96,47 @@ async function dbInsertThrow({
   matchId,
   setId,
   setNumber,
-  throwNumber,
+  throwerSide,   // ← already passed in
   playerId,
   score,
   isMiss,
-  isFault,
+  isFault
 }) {
-	const record = {
-	  match_id: matchId,
-	  set_id: setId || null,
-	  set_number: setNumber,
-	  throw_number: throwNumber,
-	  side: scoringCurrentThrower, // p1 / p2
-	  player_id: playerId || null, // optional, later
-	  score,
-	  is_miss: !!isMiss,
-	  is_fault: !!isFault
-	};
+  // Get next throw number (authoritative)
+  const { data: rows, error: countErr } = await supabaseClient
+    .from("throws")
+    .select("throw_number")
+    .eq("set_id", setId)
+    .order("throw_number", { ascending: false })
+    .limit(1);
 
-  const { data, error } = await supabaseClient.from("throws").insert(record);
-
-  if (error) {
-    console.error("dbInsertThrow error:", error, record);
+  if (countErr) {
+    console.error("[dbInsertThrow] failed to get last throw", countErr);
+    throw countErr;
   }
 
-  return { data, error };
+  const nextThrowNumber =
+    rows && rows.length ? rows[0].throw_number + 1 : 1;
+
+  // Insert throw — INCLUDING side
+  const { error: insertErr } = await supabaseClient
+    .from("throws")
+    .insert({
+      match_id: matchId,
+      set_id: setId,
+      set_number: setNumber,
+      throw_number: nextThrowNumber,
+      side: throwerSide,          // THIS IS THE FIX
+      player_id: playerId,
+      score,
+      is_miss: isMiss,
+      is_fault: isFault
+    });
+
+  if (insertErr) {
+    console.error("[dbInsertThrow] insert failed", insertErr);
+    throw insertErr;
+  }
 }
 
 /**

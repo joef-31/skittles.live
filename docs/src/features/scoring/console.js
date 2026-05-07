@@ -56,6 +56,7 @@ window.mountScoringConsole = function mountScoringConsole({ mode }) {
           <div>Sets: <span id="scoring-p1-sets">0</span></div>
           <div>Match SP: <span id="scoring-p1-sp">0</span></div>
           <div>Points: <span id="scoring-p1-setsp">0</span></div>
+          <div><span id="scoring-p1-misses"></span></div>
         </div>
 
         <div class="scoring-player">
@@ -63,6 +64,7 @@ window.mountScoringConsole = function mountScoringConsole({ mode }) {
           <div>Sets: <span id="scoring-p2-sets">0</span></div>
           <div>Match SP: <span id="scoring-p2-sp">0</span></div>
           <div>Points: <span id="scoring-p2-setsp">0</span></div>
+          <div><span id="scoring-p2-misses"></span></div>
         </div>
       </div>
 
