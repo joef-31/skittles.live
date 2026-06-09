@@ -208,7 +208,7 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId, op
 	  if (!window.__scorerOwnsState) {
 		window.__scorerOwnsState = true;
 
-		resetScoringStateForMatch(
+		await resetScoringStateForMatch(
 		  {
 			...match,
 			min_team_size: editionMinTeamSize
@@ -225,13 +225,12 @@ App.Features.Match.renderMatchDetail = async function (matchId, tournamentId, op
   // -----------------------
   // Group throws by set
   // -----------------------
-  const throwsBySet = {};
-  (throwsData || []).forEach(t => {
-    if (!throwsBySet[t.set_number]) {
-      throwsBySet[t.set_number] = [];
-    }
-    throwsBySet[t.set_number].push(t);
-  });
+	const throwsBySet = {};
+	(throwsData || []).forEach(t => {
+	  const key = t.set_id || `number:${t.set_number}`;
+	  if (!throwsBySet[key]) throwsBySet[key] = [];
+	  throwsBySet[key].push(t);
+	});
   
 	const c1Id = isTeamTournament ? match.team1?.id : match.player1?.id;
 	const c2Id = isTeamTournament ? match.team2?.id : match.player2?.id;
@@ -448,8 +447,8 @@ function buildSinglesMatchStats({
     .sort((a, b) => Number(a.set_number) - Number(b.set_number));
 
   sortedSets.forEach(set => {
-    const setNo = set.set_number;
-    const setThrows = (throwsBySet[setNo] || [])
+	const setKey = set.id || `number:${set.set_number}`;
+	const setThrows = (throwsBySet[setKey] || [])
       .slice()
       .sort((a, b) => Number(a.throw_number) - Number(b.throw_number));
 
@@ -596,49 +595,65 @@ function renderStatCompareRow(label, p1Value, p2Value, formatter = v => v, maxVa
 
 function renderMatchStatsTab(stats, p1Name, p2Name, isTeamTournament) {
   const el = document.getElementById("tab-stats");
-    console.log("[stats tab]", { el, stats, p1Name, p2Name, isTeamTournament });
   if (!el) return;
-
-  if (isTeamTournament) {
-    el.innerHTML = `
-      <div class="empty-message">
-        Team match stats are not available yet.
-      </div>
-    `;
-    return;
-  }
 
   const oneDp = v => Number(v || 0).toFixed(1);
   const whole = v => Number(v || 0);
   const pct = v => `${Math.round(Number(v || 0) * 100)}%`;
   const nullableOneDp = v => v === null ? "N/A" : Number(v || 0).toFixed(1);
 
-  el.innerHTML = `
+  const comparisonHtml = `
     <div class="match-stats-head">
       <div>${p1Name}</div>
       <div>${p2Name}</div>
     </div>
 
-	${renderStatCompareRow("Sets won", stats.p1.setWins, stats.p2.setWins, whole)}
-	${renderStatCompareRow("Break shot average", stats.p1.averageBreak, stats.p2.averageBreak, oneDp, 12)}
-	${renderStatCompareRow("Average per shot", stats.p1.averageThrow, stats.p2.averageThrow, oneDp, 12)}
+    ${renderStatCompareRow("Sets won", stats.p1.setWins, stats.p2.setWins, whole)}
+    ${renderStatCompareRow("Break shot average", stats.p1.averageBreak, stats.p2.averageBreak, oneDp, 12)}
+    ${renderStatCompareRow("Average per shot", stats.p1.averageThrow, stats.p2.averageThrow, oneDp, 12)}
     ${renderStatCompareRow("Total small points", stats.p1.setPoints, stats.p2.setPoints, whole)}
     ${renderStatCompareRow("Throws", stats.p1.throws, stats.p2.throws, whole)}
-	${renderStatCompareRow("Misses", stats.p1.misses, stats.p2.misses, whole, Math.max(stats.p1.throws, stats.p2.throws))}
-    ${renderStatCompareRow("Miss %", stats.p1.missRate, stats.p2.missRate, pct,1)}
-	${renderStatCompareRow("Reductions to 25", stats.p1.reductionsTo25, stats.p2.reductionsTo25, whole)}
-	${renderStatCompareRow("Clean sets", stats.p1.cleanSets, stats.p2.cleanSets, whole, stats.totalSets)}
-    ${renderStatCompareRow("Average set score", stats.p1.averageSetScore, stats.p2.averageSetScore, oneDp,50)}
+    ${renderStatCompareRow("Misses", stats.p1.misses, stats.p2.misses, whole, Math.max(stats.p1.throws, stats.p2.throws))}
+    ${renderStatCompareRow("Miss %", stats.p1.missRate, stats.p2.missRate, pct, 1)}
+    ${renderStatCompareRow("Reductions to 25", stats.p1.reductionsTo25, stats.p2.reductionsTo25, whole)}
+    ${renderStatCompareRow("Clean sets", stats.p1.cleanSets, stats.p2.cleanSets, whole, stats.totalSets)}
+    ${renderStatCompareRow("Average set score", stats.p1.averageSetScore, stats.p2.averageSetScore, oneDp, 50)}
     ${renderStatCompareRow("Average throws per set win", stats.p1.averageThrowsPerSetWin, stats.p2.averageThrowsPerSetWin, nullableOneDp)}
 
     <div class="match-stats-subtitle">Set finish speed</div>
 
-	${renderStatCompareRow("5-shot finishes", stats.p1.finish5, stats.p2.finish5, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
-	${renderStatCompareRow("6–8 shot finishes", stats.p1.finish6to8, stats.p2.finish6to8, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
-	${renderStatCompareRow("9–12 shot finishes", stats.p1.finish9to12, stats.p2.finish9to12, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
-	${renderStatCompareRow("13–15 shot finishes", stats.p1.finish13to15, stats.p2.finish13to15, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
-	${renderStatCompareRow("16+ shot finishes", stats.p1.finish16plus, stats.p2.finish16plus, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
+    ${renderStatCompareRow("5-shot finishes", stats.p1.finish5, stats.p2.finish5, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
+    ${renderStatCompareRow("6–8 shot finishes", stats.p1.finish6to8, stats.p2.finish6to8, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
+    ${renderStatCompareRow("9–12 shot finishes", stats.p1.finish9to12, stats.p2.finish9to12, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
+    ${renderStatCompareRow("13–15 shot finishes", stats.p1.finish13to15, stats.p2.finish13to15, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
+    ${renderStatCompareRow("16+ shot finishes", stats.p1.finish16plus, stats.p2.finish16plus, whole, Math.max(stats.p1.setWins, stats.p2.setWins))}
   `;
+
+  if (!isTeamTournament) {
+    el.innerHTML = comparisonHtml;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="stats-subtabs">
+      <button type="button" class="stats-subtab active" data-stats-panel="team">
+        Team stats
+      </button>
+      <button type="button" class="stats-subtab" data-stats-panel="players">
+        Player stats
+      </button>
+    </div>
+
+    <div class="stats-subpanel active" data-stats-panel-content="team">
+      ${comparisonHtml}
+    </div>
+
+    <div class="stats-subpanel" data-stats-panel-content="players">
+      ${renderPlayerStats(stats)}
+    </div>
+  `;
+
+  wireStatsSubtabs(el);
 }
 
 function wireMatchDetailTabs() {
@@ -661,6 +676,33 @@ function wireMatchDetailTabs() {
       panel.classList.toggle("is-visible", panel.id === `tab-${target}`);
     });
   });
+}
+
+function wireStatsSubtabs(root) {
+  root.querySelectorAll(".stats-subtab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.statsPanel;
+
+      root.querySelectorAll(".stats-subtab").forEach(b => {
+        b.classList.toggle("active", b === btn);
+      });
+
+      root.querySelectorAll(".stats-subpanel").forEach(panel => {
+        panel.classList.toggle(
+          "active",
+          panel.dataset.statsPanelContent === target
+        );
+      });
+    });
+  });
+}
+
+function renderPlayerStats(stats) {
+  return `
+    <div class="empty-message">
+      Player stats coming next.
+    </div>
+  `;
 }
 
 function syncHeaderTikku() {
@@ -1019,7 +1061,6 @@ async function loadMatchThrowsUpload(matchId) {
 }
 
 async function loadTournamentMatchSets(matchId, tournamentId) {
-	console.log("[loadTournamentMatchSets] called", matchId);
 
   window.currentMatchId = matchId;
   window.currentTournamentId = tournamentId;
@@ -1340,21 +1381,39 @@ App.Features.Match.refreshMatchSets = async function () {
     .order("set_number")
     .order("throw_number");
 
-  const throwsBySet = {};
-  (throwsData || []).forEach(t => {
-    if (!throwsBySet[t.set_number]) {
-      throwsBySet[t.set_number] = [];
-    }
-    throwsBySet[t.set_number].push(t);
-  });
+	const throwsBySet = {};
+	(throwsData || []).forEach(t => {
+	  const key = t.set_id || `number:${t.set_number}`;
 
- App.Features.Match.renderMatchSets(
-    sets,
+	  if (!throwsBySet[key]) {
+		throwsBySet[key] = [];
+	  }
+
+	  throwsBySet[key].push(t);
+	});
+
+  App.Features.Match.renderMatchSets(
+    sets || [],
     throwsBySet,
     window.scoringMatch.p1Id,
     window.scoringMatch.p2Id,
     window.scoringMatch.p1Name,
     window.scoringMatch.p2Name
+  );
+
+  const matchStats = buildSinglesMatchStats({
+    sets: sets || [],
+    throwsBySet,
+    p1Id: window.scoringMatch.p1Id,
+    p2Id: window.scoringMatch.p2Id,
+    isTeamTournament: window.scoringMatch.isTeamMatch
+  });
+
+  renderMatchStatsTab(
+    matchStats,
+    window.scoringMatch.p1Name,
+    window.scoringMatch.p2Name,
+    window.scoringMatch.isTeamMatch
   );
 };
 
@@ -1367,27 +1426,3 @@ async function DEV_resetMatch(matchId) {
     status: "scheduled"
   }).eq("id", matchId);
 }
-
-/*
-(async () => {
-  const matchId = window.currentMatchId;
-
-  if (!matchId) {
-    console.error("No currentMatchId found");
-    return;
-  }
-
-  await supabaseClient.from("throws").delete().eq("match_id", matchId);
-  await supabaseClient.from("sets").delete().eq("match_id", matchId);
-  await supabaseClient
-    .from("matches")
-    .update({
-      final_sets_player1: 0,
-      final_sets_player2: 0,
-      status: "scheduled"
-    })
-    .eq("id", matchId);
-
-  console.log("Match fully reset:", matchId);
-})();
-*/

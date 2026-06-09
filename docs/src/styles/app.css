@@ -2501,3 +2501,46 @@ input[type="number"] {
 .stat-bar-p2 {
   background: rgba(120, 210, 255, 0.8);
 }
+
+.stats-subtabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stats-subtab {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.stats-subpanel {
+  display: none;
+}
+
+.stats-subpanel.is-visible {
+  display: block;
+}
+
+.format-builder-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.format-builder-tab {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.format-builder-panel {
+  display: none;
+}
+
+.format-builder-panel.active {
+  display: block;
+}

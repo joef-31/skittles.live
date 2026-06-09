@@ -37,6 +37,11 @@ App.Features.Match.renderMatchSets = function (
 
   sets.forEach((s) => {
     const setNum = s.set_number;
+	const setKey = s.id || `number:${setNum}`;
+
+	const isActiveSet =
+	  s.id === window.scoringCurrentSetId ||
+	  (!s.winner_player_id && s.current_thrower);
     const p1Score = s.score_player1 ?? "";
     const p2Score = s.score_player2 ?? "";
 
@@ -69,7 +74,25 @@ App.Features.Match.renderMatchSets = function (
           <div class="col mid">${cumP1}–${cumP2}</div>
           <div class="col right ${p2Win ? "winner" : ""}">${p2Score}</div>
         </div>
-        <div class="set-throws-expanded" data-set="${setNum}" style="display:none;"></div>
+        <div
+		  class="set-throws-expanded"
+		  data-set="${setNum}"
+		  data-set-id="${s.id || ""}"
+		  style="display:${isActiveSet ? "block" : "none"};"
+		>
+		  ${
+			isActiveSet
+			  ? (() => {
+				  const raw = throwsBySet[setKey] || throwsBySet[setNum] || [];
+				  const model = buildThrowsModel(raw, p1Id, p2Id);
+
+				  return model.length
+					? App.Features.Match.buildThrowsTableHTML(model, p1Name, p2Name)
+					: '<div class="empty-message">No throw history for this set yet.</div>';
+				})()
+			  : ""
+		  }
+		</div>
       </div>
     `;
   });
@@ -94,7 +117,13 @@ App.Features.Match.renderMatchSets = function (
 
       if (isOpen) return;
 
-      const raw = throwsBySet[setNum] || [];
+	const setBlock = row.closest(".set-block");
+	const setId = setBlock?.querySelector(".set-throws-expanded")?.dataset.setId;
+	const raw =
+	  throwsBySet[setId] ||
+	  throwsBySet[`number:${setNum}`] ||
+	  throwsBySet[setNum] ||
+	  [];
       const model = buildThrowsModel(raw, p1Id, p2Id);
 
       expanded.innerHTML = model.length
@@ -105,6 +134,41 @@ App.Features.Match.renderMatchSets = function (
     });
   });
 }
+
+App.Features.Match.refreshExpandedSetThrows = async function (setId) {
+  if (!setId || !window.currentMatchId || !window.scoringMatch) return;
+
+  const expanded = document.querySelector(
+    `.set-throws-expanded[data-set-id="${setId}"]`
+  );
+
+  if (!expanded || expanded.style.display !== "block") return;
+
+  const { data: throwsData, error } = await window.supabaseClient
+    .from("throws")
+    .select("*")
+    .eq("set_id", setId)
+    .order("throw_number", { ascending: true });
+
+  if (error) {
+    console.error("[refreshExpandedSetThrows] failed", error);
+    return;
+  }
+
+  const model = buildThrowsModel(
+    throwsData || [],
+    window.scoringMatch.p1Id,
+    window.scoringMatch.p2Id
+  );
+
+  expanded.innerHTML = model.length
+    ? App.Features.Match.buildThrowsTableHTML(
+        model,
+        window.scoringMatch.p1Name,
+        window.scoringMatch.p2Name
+      )
+    : '<div class="empty-message">No throw history for this set yet.</div>';
+};
 
 async function smoothUpdateSetRow(updatedSet) {
     const setNumber = updatedSet.set_number;

@@ -53,21 +53,28 @@ async function dbGetSet(matchId, setNumber) {
  * Used so throws always have a valid set_id.
  */
 async function dbGetOrCreateSet(matchId, setNumber, firstThrower = null) {
-  const upsertRow = {
+  const existing = await dbGetSet(matchId, setNumber);
+
+  if (existing.data) {
+    return { data: existing.data, error: null };
+  }
+
+  if (existing.error) {
+    return { data: null, error: existing.error };
+  }
+
+  const insertRow = {
     match_id: matchId,
     set_number: setNumber,
     score_player1: 0,
     score_player2: 0,
-    winner_player_id: null
+    winner_player_id: null,
+    current_thrower: firstThrower || null
   };
-
-  if (firstThrower) {
-    upsertRow.current_thrower = firstThrower;
-  }
 
   const { data, error } = await supabaseClient
     .from("sets")
-    .upsert(upsertRow, { onConflict: "match_id,set_number" })
+    .insert(insertRow)
     .select("*")
     .single();
 
@@ -164,23 +171,12 @@ async function dbUpdateSet({ matchId, setNumber, sp1, sp2, winnerId }) {
  * Create NEXT set with small-points reset. Used when a set is won.
  */
 async function dbCreateNextSet(matchId, previousSetNumber) {
-  const nextNumber = previousSetNumber + 1;
+  console.warn(
+    "[dbCreateNextSet] disabled: sets should only be created when Start set is pressed.",
+    { matchId, previousSetNumber }
+  );
 
-  const { data, error } = await supabaseClient
-    .from("sets")
-    .upsert({
-      match_id: matchId,
-      set_number: nextNumber,
-      score_player1: 0,
-      score_player2: 0,
-      winner_player_id: null,
-    });
-
-  if (error) {
-    console.error("dbCreateNextSet error:", error);
-  }
-
-  return { data, error };
+  return { data: null, error: null };
 }
 
 if (typeof window.initSetsMatchListRealtime === "function") {

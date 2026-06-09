@@ -1019,7 +1019,8 @@ function renderStandingsTable(
   groups,
   container,
   advancementRules = [],
-  standingsConfig = null
+  standingsConfig = null,
+  actualAdvancementByTarget = null
 ) {
 	const config = standingsConfig || DEFAULT_STANDINGS_CONFIG;
   if (!container) return;
@@ -1058,13 +1059,14 @@ function renderStandingsTable(
 
     const sorted = sortStandings(rows, config.ranking);
 
-    renderStandingsGroup({
-      container,
-      group,
-      rows: sorted,
-      config,
-      advancementRules
-    });
+	renderStandingsGroup({
+	  container,
+	  group,
+	  rows: sorted,
+	  config,
+	  advancementRules,
+	  actualAdvancementByTarget
+	});
   });
 }
 
@@ -1250,15 +1252,42 @@ function renderStandingsRow({
   index,
   columns,
   advancementRules,
-  groupSize
+  groupSize,
+  actualAdvancementByTarget
 }) {
   const position = index + 1;
 
-  const advRule = resolveAdvancementForPosition(
-    position,
-    groupSize,
-    advancementRules
-  );
+	let advRule = null;
+
+	for (const rule of advancementRules || []) {
+	  const actualIds = actualAdvancementByTarget?.get(rule.target_stage_id);
+	  const hasFinalisedActuals = actualIds && actualIds.size > 0;
+
+	  // Finalised mode for this specific target stage
+	  if (hasFinalisedActuals) {
+		if (actualIds.has(competitor.competitor_id)) {
+		  // Keep the rule's own condition/layer/description.
+		  // Do NOT force condition: "advance".
+		  advRule = rule;
+		  break;
+		}
+
+		// This target has been finalised, so do not use positional fallback for it.
+		continue;
+	  }
+
+	  // Pre-finalisation mode for this target stage
+	  const positionalRule = resolveAdvancementForPosition(
+		position,
+		groupSize,
+		[rule]
+	  );
+
+	  if (positionalRule) {
+		advRule = positionalRule;
+		break;
+	  }
+	}
 
   const advClass = advRule
     ? `adv-${advRule.condition} adv-layer-${advRule.layer}`
@@ -1294,7 +1323,8 @@ function renderStandingsGroup({
   group,
   rows,
   config,
-  advancementRules
+  advancementRules,
+  actualAdvancementByTarget
 }) {
   container.insertAdjacentHTML(
     "beforeend",
@@ -1319,7 +1349,8 @@ function renderStandingsGroup({
                   index,
                   columns: config.columns,
                   advancementRules,
-                  groupSize: rows.length
+                  groupSize: rows.length,
+				  actualAdvancementByTarget
                 })
               ).join("")
             : `<tr>
@@ -1542,13 +1573,36 @@ async function renderTournamentStandingsTab(tournamentId) {
 	const stageAdvancementRules =
 	  (advancementRules || []).filter(r => r.source_stage_id === stageId);
 
+	const isTeamTournament =
+	  Number(
+		window.currentEditions?.find(
+		  e => e.id === window.tournamentContext?.editionId
+		)?.min_team_size
+	  ) > 1;
+
+	const actualAdvancementByTarget = new Map();
+
+	for (const rule of stageAdvancementRules) {
+	  if (!rule.target_stage_id) continue;
+	  if (actualAdvancementByTarget.has(rule.target_stage_id)) continue;
+
+	  const ids = await getFinalisedAdvancementIds({
+		sourceStageId: stageId,
+		targetStageId: rule.target_stage_id,
+		isTeamTournament
+	  });
+
+	  actualAdvancementByTarget.set(rule.target_stage_id, ids);
+	}
+
 	renderStandingsTable(
 	  matches,
 	  sets || [],
 	  groups,
 	  el,
 	  stageAdvancementRules,
-	  stage?.standings_config || null
+	  stage?.standings_config || null,
+	  actualAdvancementByTarget
 	);
 }
 
@@ -1909,7 +1963,6 @@ function renderKnockoutDraw({ stages, matches, stageGraph }) {
   });
 }
 
-
 async function buildBracketMetadataForEdition(editionId) {
   if (!editionId) return;
 
@@ -2268,6 +2321,18 @@ function renderTournamentManageTab(
 			</button>
 		  </div>
 		</div>
+		
+		<div class="card manage-card clickable" id="manage-format-card">
+		  <div class="manage-title">Format builder</div>
+		  <div class="manage-desc">
+			New simplified setup for group advancement and knockout rounds.
+		  </div>
+		  <div class="manage-actions">
+			<button class="header-btn small" type="button">
+			  Open format builder
+			</button>
+		  </div>
+		</div>
 
 		<!-- SINGLE, correct subview container -->
 		<div id="manage-subview" style="grid-column: 1 / -1;"></div>
@@ -2336,6 +2401,15 @@ function renderTournamentManageTab(
 		});
 	}
 
+	// Open format manager
+	const formatCard = el.querySelector("#manage-format-card");
+	if (formatCard) {
+	  formatCard.addEventListener("click", () => {
+		window.tournamentContext.manageSubview = "format";
+		renderTournamentManageTab(tournament, editions, allStages);
+	  });
+	}
+
 	// Render manage subview
 	const subviewEl = el.querySelector("#manage-subview");
 	if (!subviewEl) return;
@@ -2367,6 +2441,24 @@ function renderTournamentManageTab(
 	
 	if (window.tournamentContext.manageSubview === "teams") {
 	  App.Teams.renderManageTeamsSection(subviewEl);
+	}
+	
+	if (window.tournamentContext.manageSubview === "format") {
+	  if (App?.Features?.Tournament?.FormatBuilder?.render) {
+		App.Features.Tournament.FormatBuilder.render({
+		  tournamentId: tournament.id,
+		  editionId: window.tournamentContext.editionId,
+		  container: subviewEl
+		});
+	  } else {
+		subviewEl.innerHTML = `
+		  <div class="card">
+			<div class="error">
+			  Format builder file is not loaded.
+			</div>
+		  </div>
+		`;
+	  }
 	}
 }
 
@@ -4423,19 +4515,23 @@ function renderManageMatches(matches, { groups = [] } = {}) {
 	  !isAdmin;
 	
 	// EARLY GUARD — only block tools that truly need a stage
+	const hasManageTarget =
+	  window.tournamentContext?.stageId ||
+	  window.tournamentContext?.selectedBracketId;
+
 	if (
 	  isAdmin &&
 	  !isFriendlies &&
 	  !isCasualPlayer &&
 	  (
 		!window.tournamentContext?.editionId ||
-		!window.tournamentContext?.stageId
+		!hasManageTarget
 	  )
 	) {
 	  el.innerHTML = `
 		<div class="card">
 		  <div class="error">
-			Please select an edition and stage before managing matches.
+			Please select an edition and stage or bracket before managing matches.
 		  </div>
 		</div>
 	  `;
@@ -4737,7 +4833,13 @@ function renderTournamentMatchesTable(matches = []) {
 
 function openStageSetEditor() {
   const stageId = window.tournamentContext.stageId;
-  if (!stageId) return;
+  const bracketId = window.tournamentContext.selectedBracketId;
+
+  if (!stageId && !bracketId) return;
+
+  const target = bracketId
+    ? { type: "bracket", id: bracketId }
+    : { type: "stage", id: stageId };
 
   // Remove any existing overlay
   document.querySelector(".overlay-backdrop")?.remove();
@@ -4758,13 +4860,21 @@ function openStageSetEditor() {
 	  <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
 		<label>
 		  Number of sets
-		  <select id="bulk-set-count">
-			<option value="1">1 set</option>
-			<option value="2">2 sets</option>
-			<option value="3">3 sets</option>
-			<option value="4">4 sets</option>
-			<option value="5">5 sets</option>
-		  </select>
+		  <input
+			type="number"
+			id="bulk-set-count"
+			class="form-input"
+			min="1"
+			max="99"
+			step="1"
+			value="5"
+			style="width:90px;"
+		  />
+		</label>
+
+		<label style="display:flex; gap:6px; align-items:center; align-self:flex-end;">
+		  <input type="checkbox" id="bulk-set-enable-editing" />
+		  Enable manual editing
 		</label>
 
 		<label style="flex:1;">
@@ -4808,12 +4918,24 @@ function openStageSetEditor() {
     .addEventListener("click", () => backdrop.remove());
 
   // Load data
-  loadStageMatchesAndSets(stageId);
+  loadMatchesAndSetsForBulkEditor(target);
   
 	document
 	  .getElementById("bulk-set-count")
 	  .addEventListener("change", e => {
 		const count = Number(e.target.value);
+		const errorEl = document.getElementById("bulk-set-errors");
+
+		if (!Number.isInteger(count) || count < 1 || count > 99) {
+		  if (errorEl) {
+			errorEl.textContent =
+			  "Number of sets must be a whole number between 1 and 99.";
+		  }
+		  return;
+		}
+
+		if (errorEl) errorEl.textContent = "";
+
 		stageGridModel.maxSetCount = count;
 		rebuildGridSetColumns();
 	  });
@@ -4961,6 +5083,18 @@ function parseBulkSetCsv() {
 
 }
 
+async function loadMatchesAndSetsForBulkEditor(target) {
+  if (!target?.id) return;
+
+  if (target.type === "stage") {
+    return loadStageMatchesAndSets(target.id);
+  }
+
+  if (target.type === "bracket") {
+    return loadBracketMatchesAndSets(target.id);
+  }
+}
+
 async function loadStageMatchesAndSets(stageId) {
 	  console.log("LOAD STAGE SETS", stageId);
   const gridEl = document.getElementById("bulk-set-grid");
@@ -4990,6 +5124,78 @@ async function loadStageMatchesAndSets(stageId) {
     .in("match_id", matchIds);
 
   buildGridModel(matches, sets);
+}
+
+async function loadBracketMatchesAndSets(bracketId) {
+  console.log("LOAD BRACKET SETS", bracketId);
+
+  const gridEl = document.getElementById("bulk-set-grid");
+  gridEl.textContent = "Loading…";
+
+  const bracketStageIds = (window.currentStages || [])
+    .filter(s =>
+      s.stage_type === "knockout" &&
+      s.bracket_id === bracketId
+    )
+    .map(s => s.id);
+
+  if (!bracketStageIds.length) {
+    gridEl.innerHTML = `
+      <div class="empty-message">
+        No knockout stages found for this bracket.
+      </div>
+    `;
+    return;
+  }
+
+  const { data: matches, error: matchError } = await window.supabaseClient
+    .from("matches")
+    .select(`
+      id,
+      match_date,
+      status,
+      bracket_meta,
+      stage_id,
+      player1:player1_id ( id, name ),
+      player2:player2_id ( id, name ),
+      team1:team1_id ( id, name ),
+      team2:team2_id ( id, name )
+    `)
+    .in("stage_id", bracketStageIds)
+    .neq("status", "structure");
+
+  if (matchError) {
+    console.error(matchError);
+    gridEl.textContent = "Failed to load bracket matches";
+    return;
+  }
+
+  const orderedMatches = (matches || []).slice().sort((a, b) => {
+    const ar = Number(a.bracket_meta?.round_index ?? a.bracket_meta?.round ?? 0);
+    const br = Number(b.bracket_meta?.round_index ?? b.bracket_meta?.round ?? 0);
+    if (ar !== br) return ar - br;
+
+    const ao = Number(a.bracket_meta?.slot_index ?? a.bracket_meta?.order ?? 0);
+    const bo = Number(b.bracket_meta?.slot_index ?? b.bracket_meta?.order ?? 0);
+    if (ao !== bo) return ao - bo;
+
+    return new Date(a.match_date || 0) - new Date(b.match_date || 0);
+  });
+
+  const matchIds = orderedMatches.map(m => m.id);
+
+  const { data: sets, error: setsError } = await window.supabaseClient
+    .from("sets")
+    .select("*")
+    .in("match_id", matchIds);
+
+  if (setsError) {
+    console.error(setsError);
+    gridEl.textContent = "Failed to load sets";
+    return;
+  }
+
+  buildGridModel(orderedMatches, sets || []);
 }
 
 let stageGridModel = null;
@@ -5102,6 +5308,57 @@ function extractValidSets(match) {
   return sets;
 }
 
+function wireBulkSetEditingToggle() {
+  const toggle = document.getElementById("bulk-set-enable-editing");
+  if (!toggle) return;
+
+  const sync = () => {
+    document
+      .querySelectorAll(".bulk-set-input")
+      .forEach(input => {
+        input.disabled = !toggle.checked;
+      });
+  };
+
+  toggle.addEventListener("change", sync);
+  sync();
+}
+
+function wireBulkSetInputHandlers() {
+  document
+    .querySelectorAll(".bulk-set-input")
+    .forEach(input => {
+      input.addEventListener("input", () => {
+        const editingEnabled =
+          document.getElementById("bulk-set-enable-editing")?.checked === true;
+
+        if (!editingEnabled) return;
+
+        const match = stageGridModel.matches[input.dataset.matchId];
+        if (!match) return;
+
+        const side = input.dataset.side;
+        const idx = Number(input.dataset.setIndex);
+
+        const raw = input.value.trim();
+        const value = raw === "" ? null : Number(raw);
+
+        if (raw !== "" && Number.isNaN(value)) return;
+
+        match[side === "p1" ? "player1" : "player2"].sets[idx].value = value;
+        match.dirty = true;
+
+        recalculateFss(match);
+        renderBulkSetGrid();
+
+        const saveBtn = document.getElementById("bulk-set-save");
+        if (saveBtn) {
+          saveBtn.disabled = !Object.values(stageGridModel.matches).some(matchHasAnySet);
+        }
+      });
+    });
+}
+
 function renderBulkSetGrid() {
   const gridEl = document.getElementById("bulk-set-grid");
   gridEl.innerHTML = "";
@@ -5133,6 +5390,9 @@ function renderBulkSetGrid() {
 		extractValidSets(match).length > 0
 	  );
 	}
+	
+	wireBulkSetInputHandlers();
+	wireBulkSetEditingToggle();
 }
 
 async function saveBulkSets() {
@@ -5144,6 +5404,25 @@ async function saveBulkSets() {
     for (const match of Object.values(stageGridModel.matches)) {
       const validSets = extractValidSets(match);
       if (validSets.length === 0) continue;
+
+      // 🚨 SAFETY CHECK
+      // Prevent destructive overwrite of live-scored matches
+      const { data: existingThrows, error: throwCheckErr } =
+        await window.supabaseClient
+          .from("throws")
+          .select("id")
+          .eq("match_id", match.matchId)
+          .limit(1);
+
+      if (throwCheckErr) {
+        throw throwCheckErr;
+      }
+
+      if (existingThrows?.length) {
+        throw new Error(
+          `Blocked: ${match.player1.name} v ${match.player2.name} has throw history. Bulk set save would delete throws.`
+        );
+      }
 
       // 1️⃣ delete existing sets
       await window.supabaseClient
@@ -5160,7 +5439,9 @@ async function saveBulkSets() {
         winner_player_id: s.winner_player_id
       }));
 
-      await window.supabaseClient.from("sets").insert(rows);
+      await window.supabaseClient
+        .from("sets")
+        .insert(rows);
 
       // 3️⃣ update match summary
       await window.supabaseClient
@@ -5171,14 +5452,20 @@ async function saveBulkSets() {
           final_sets_player2: match.derivedFss.p2
         })
         .eq("id", match.matchId);
+		
+		if (typeof propagateKoWinner === "function") {
+		  await propagateKoWinner(match.matchId);
+		}
     }
 
     alert("Sets saved successfully");
+
     loadTournamentOverview(window.currentTournamentId);
 
   } catch (err) {
     console.error(err);
-    alert("Failed to save sets. See console.");
+    alert(err.message || "Failed to save sets. See console.");
+
   } finally {
     saveBtn.textContent = "Save results";
     saveBtn.disabled = false;
@@ -5191,9 +5478,13 @@ function renderPlayerRow(player, match, side) {
     <div style="width:40px; text-align:center;">
       ${match.derivedFss[side]}
     </div>
-    ${player.sets.map(set => `
+    ${player.sets.map((set, i) => `
       <input
         type="number"
+        class="bulk-set-input"
+        data-match-id="${match.matchId}"
+        data-side="${side}"
+        data-set-index="${i}"
         value="${set.value ?? ""}"
         disabled
         style="width:44px;"
@@ -6394,7 +6685,7 @@ async function initKnockoutInitialisationTool({
 
 	const bracketSize = Number(bracketSel?.value || minBracket);
 
-	// NEW: ensure structure matches exist up to bracket size (even if some already exist)
+/* 	// NEW: ensure structure matches exist up to bracket size (even if some already exist)
 	await ensureKoStructureMatchesForFirstRound({
 	  tournamentId,
 	  editionId,
@@ -6411,20 +6702,32 @@ async function initKnockoutInitialisationTool({
 	  roundDate: dateInput?.value || null,
 	  firstTime: timeInput?.value || null,
 	  intervalMins: Number(intervalInput?.value || 10)
-	});
+	}); */
 
     // Load KO structure matches
-    let { data: koMatches, error: mErr } = await window.supabaseClient
-      .from("matches")
-      .select("id, status, match_meta, bracket_meta, match_date")
-      .eq("stage_id", targetStageId)
-      .eq("status", "structure")
-      .order("match_date", { ascending: true });
+	let { data: koMatches, error: mErr } = await window.supabaseClient
+	  .from("matches")
+	  .select("id, status, match_meta, bracket_meta, match_date")
+	  .eq("stage_id", targetStageId)
+	  .eq("status", "structure");
 
-    if (mErr) { console.error(mErr); setErr("Failed to load target structure matches."); return; }
+	if (mErr) {
+	  console.error(mErr);
+	  setErr("Failed to load target structure matches.");
+	  return;
+	}
+
+	koMatches = (koMatches || []).sort((a, b) =>
+	  Number(a.bracket_meta?.order || 0) -
+	  Number(b.bracket_meta?.order || 0)
+	);
 	
 	if (!koMatches?.length) {
-	  setErr("No structure matches found (creation failed).");
+	  formEl.innerHTML = `
+		<div class="empty-message">
+		  No bracket structure exists yet. Choose a bracket size, then click Initialise bracket.
+		</div>
+	  `;
 	  return;
 	}
 
@@ -6434,8 +6737,9 @@ async function initKnockoutInitialisationTool({
       sourceStageId
     });
 
-    applyKoInitMetaToForm(koMatches || []);
 	wireByeDisablesPositions();
+	restoreKoInitDateTimeFields(koMatches || []);
+	await applyKoInitMetaToForm(koMatches || []);
   }
 
 	targetSel.addEventListener("change", refreshForm);
@@ -6511,13 +6815,26 @@ async function initKnockoutInitialisationTool({
 		});
 
 		finaliseWrap.innerHTML = renderKoFinaliseTable(resolvedByMatch);
+		
+		document.querySelectorAll(".ko-finalise-override-toggle").forEach(cb => {
+		  cb.addEventListener("change", () => {
+			const selector =
+			  `[data-match-id="${cb.dataset.matchId}"][data-slot="${cb.dataset.slot}"]`;
+
+			const sel = document.querySelector(`.ko-finalise-select${selector}`);
+			const other = document.querySelector(`.ko-finalise-other${selector}`);
+
+			if (sel) sel.disabled = !cb.checked;
+			if (other) other.disabled = !cb.checked;
+		  });
+		});
 
 		const confirmBtn = document.getElementById("ko-finalise-confirm");
 		if (confirmBtn) {
 		  confirmBtn.addEventListener("click", async () => {
 			setErr(""); setRes("");
 			try {
-			  const editedResolved = readKoFinaliseSelections(resolvedByMatch);
+			  const editedResolved = await readKoFinaliseSelections(resolvedByMatch);
 			  await confirmKoInit({
 				editionId,
 				targetStageId,
@@ -6660,7 +6977,7 @@ function readKoInitFormMapping() {
   return mapping;
 }
 
-function applyKoInitMetaToForm(koMatches) {
+async function applyKoInitMetaToForm(koMatches) {
   for (const m of koMatches) {
     const init = m.match_meta?.init;
     if (!init) continue;
@@ -6669,12 +6986,51 @@ function applyKoInitMetaToForm(koMatches) {
       const spec = init[slot];
       if (!spec) continue;
 
-      const gSel = document.querySelector(`.ko-init-group[data-match-id="${m.id}"][data-slot="${slot}"]`);
-      const pSel = document.querySelector(`.ko-init-pos[data-match-id="${m.id}"][data-slot="${slot}"]`);
+      const gSel = document.querySelector(
+        `.ko-init-group[data-match-id="${m.id}"][data-slot="${slot}"]`
+      );
 
-      if (gSel) gSel.value = spec.group_id || "";
-      if (pSel) pSel.value = spec.position || "";
+      const pSel = document.querySelector(
+        `.ko-init-pos[data-match-id="${m.id}"][data-slot="${slot}"]`
+      );
+
+      if (!gSel || !pSel) continue;
+
+      gSel.value = spec.group_id || "";
+
+      await populateKoPositionSelect({
+        groupSelect: gSel,
+        posSelect: pSel,
+        sourceStageId: gSel.dataset.sourceStage,
+        targetStageId: document.getElementById("ko-init-target-stage")?.value
+      });
+
+      pSel.value = spec.position || "";
     }
+  }
+}
+
+function restoreKoInitDateTimeFields(koMatches) {
+  const first = [...(koMatches || [])]
+    .filter(m => m.match_date)
+    .sort((a, b) =>
+      Number(a.bracket_meta?.order || 0) -
+      Number(b.bracket_meta?.order || 0)
+    )[0];
+
+  if (!first?.match_date) return;
+
+  const d = new Date(first.match_date);
+
+  const dateInput = document.getElementById("ko-init-date");
+  const timeInput = document.getElementById("ko-init-time");
+
+  if (dateInput && !dateInput.value) {
+    dateInput.value = d.toISOString().slice(0, 10);
+  }
+
+  if (timeInput && !timeInput.value) {
+    timeInput.value = d.toTimeString().slice(0, 5);
   }
 }
 
@@ -6881,71 +7237,133 @@ async function ensureKoStructureMatchesForFirstRound({
 
   const matchCount = chosen / 2;
 
-  const { data: existing, error: exErr } = await window.supabaseClient
-    .from("matches")
-    .select("id, bracket_meta")
-    .eq("stage_id", targetStageId)
-    .eq("status", "structure");
-  if (exErr) throw exErr;
+const { data: existing, error: exErr } = await window.supabaseClient
+  .from("matches")
+  .select("id, bracket_meta, match_meta")
+  .eq("stage_id", targetStageId)
+  .eq("status", "structure");
 
-  const existingCount = (existing || []).length;
-  if (existingCount >= matchCount) return;
+if (exErr) throw exErr;
 
-  const toCreate = matchCount - existingCount;
+let baseDate = null;
 
-  let maxOrder = 0;
-  (existing || []).forEach(m => {
-    const o = Number(m.bracket_meta?.order || 0);
-    if (o > maxOrder) maxOrder = o;
-  });
+if (roundDate && firstTime) {
+  baseDate = new Date(`${roundDate}T${firstTime}:00`);
+} else if (roundDate) {
+  baseDate = new Date(`${roundDate}T00:00:00`);
+}
 
-	let baseDate = null;
+const stepMs = Math.max(0, Number(intervalMins || 0)) * 60000;
 
-	if (roundDate && firstTime) {
-	  baseDate = new Date(`${roundDate}T${firstTime}:00`);
-	} else if (roundDate) {
-	  baseDate = new Date(`${roundDate}T00:00:00`);
-	} else {
-	  baseDate = new Date("2099-01-01T00:00:00Z");
+const existingSorted = (existing || [])
+  .slice()
+  .sort((a, b) =>
+    Number(a.bracket_meta?.order || 0) -
+    Number(b.bracket_meta?.order || 0)
+  );
+  
+  const surplus = existingSorted.slice(matchCount);
+
+	if (surplus.length) {
+	  const surplusIds = surplus.map(m => m.id);
+
+	  const { error: delErr } = await window.supabaseClient
+		.from("matches")
+		.delete()
+		.in("id", surplusIds);
+
+	  if (delErr) throw delErr;
 	}
 
-	const stepMs = Math.max(0, Number(intervalMins || 0)) * 60000;
-	const inserts = [];
+const keptExisting = existingSorted.slice(0, matchCount);
 
-	for (let i = 0; i < toCreate; i++) {
-	  const order = maxOrder + i + 1;
+let maxOrder = 0;
 
-	  inserts.push({
-		tournament_id: tournamentId,
-		edition_id: editionId,
-		stage_id: targetStageId,
-		status: "structure",
-		match_date: new Date(baseDate.getTime() + (order - 1) * stepMs).toISOString(),
-      final_sets_player1: 0,
-      final_sets_player2: 0,
-      match_meta: {
-        init: {
-          source_stage_id: sourceStageId,
-          slot1: null,
-          slot2: null
-        },
-        labels: {
-          slot1: "TBD",
-          slot2: "TBD"
-        }
+for (let i = 0; i < keptExisting.length; i++) {
+  const m = existingSorted[i];
+  const order = Number(m.bracket_meta?.order || 0) || i + 1;
+
+  maxOrder = Math.max(maxOrder, order);
+
+  const currentMeta = m.match_meta || {};
+
+  const updatePayload = {
+    bracket_meta: {
+      ...(m.bracket_meta || {}),
+      round: m.bracket_meta?.round || 1,
+      order
+    },
+    match_meta: {
+      ...currentMeta,
+      init: currentMeta.init || {
+        source_stage_id: sourceStageId,
+        slot1: null,
+        slot2: null
       },
-      bracket_meta: {
-        round: 1,
-        order
+      labels: {
+        slot1: currentMeta.labels?.slot1 || "TBD",
+        slot2: currentMeta.labels?.slot2 || "TBD",
+        ...(currentMeta.labels || {})
       }
-    });
+    }
+  };
+
+  if (baseDate) {
+    updatePayload.match_date =
+      new Date(baseDate.getTime() + (order - 1) * stepMs).toISOString();
   }
 
+  const { error: upErr } = await window.supabaseClient
+    .from("matches")
+    .update(updatePayload)
+    .eq("id", m.id);
+
+  if (upErr) throw upErr;
+}
+
+const existingCount = keptExisting.length;
+const toCreate = Math.max(0, matchCount - existingCount);
+
+const inserts = [];
+
+for (let i = 0; i < toCreate; i++) {
+  const order = maxOrder + i + 1;
+
+  inserts.push({
+    tournament_id: tournamentId,
+    edition_id: editionId,
+    stage_id: targetStageId,
+    status: "structure",
+    match_date: baseDate
+      ? new Date(baseDate.getTime() + (order - 1) * stepMs).toISOString()
+      : null,
+    final_sets_player1: 0,
+    final_sets_player2: 0,
+    match_meta: {
+      init: {
+        source_stage_id: sourceStageId,
+        slot1: null,
+        slot2: null
+      },
+      labels: {
+        slot1: "TBD",
+        slot2: "TBD"
+      }
+    },
+    bracket_meta: {
+      round: 1,
+      order
+    }
+  });
+}
+
+if (inserts.length) {
   const { error: insErr } = await window.supabaseClient
     .from("matches")
     .insert(inserts);
 
   if (insErr) throw insErr;
+}
 }
 
 async function applyKoStructureMatchTimes({
@@ -6992,94 +7410,63 @@ async function applyKoStructureMatchTimes({
   }
 }
 
-function wireByeDisablesPositions() {
-  const cache = window.__koGroupSizeCache || (window.__koGroupSizeCache = new Map());
+async function populateKoPositionSelect({
+  groupSelect,
+  posSelect,
+  sourceStageId,
+  targetStageId
+}) {
+  if (!groupSelect || !posSelect) return;
 
-  async function getGroupSize(stageId, groupId) {
-    const key = `${stageId}|${groupId}`;
-    if (cache.has(key)) return cache.get(key);
+  const groupId = groupSelect.value;
 
-    // Count distinct competitors from STRUCTURE matches in that group.
-    // This works because group initialisation creates structure matches with player1/team1 set.
-	const { data, error } = await window.supabaseClient
-	  .from("matches")
-	  .select("id")
-	  .eq("stage_id", stageId)
-	  .eq("group_id", groupId)
-	  .eq("status", "structure");
-
-	if (error) throw error;
-
-	const size = (data || []).length;
-    cache.set(key, size);
-    return size;
+  if (!groupId || groupId === "__BYE__") {
+    posSelect.value = "";
+    posSelect.disabled = true;
+    posSelect.innerHTML = `<option value="">Pos…</option>`;
+    return;
   }
 
-	function setPosOptions(posSel, allowedPositions) {
-	  const current = posSel.value;
-	  const safe = Array.isArray(allowedPositions) ? allowedPositions : [];
+  posSelect.disabled = false;
 
-	  posSel.innerHTML =
-		`<option value="">Pos…</option>` +
-		safe.map(p => `<option value="${p}">${p}</option>`).join("");
+  const { data, error } = await window.supabaseClient
+    .from("matches")
+    .select("id")
+    .eq("stage_id", sourceStageId)
+    .eq("group_id", groupId)
+    .eq("status", "structure");
 
-	  if (current && safe.includes(Number(current))) {
-		posSel.value = current;
-	  }
-	}
+  if (error) throw error;
 
+  const groupSize = (data || []).length;
+
+  const allowedPositions = await computeAllowedPositionsForTarget({
+    sourceStageId,
+    targetStageId,
+    groupSize
+  });
+
+  posSelect.innerHTML =
+    `<option value="">Pos…</option>` +
+    allowedPositions.map(p => `<option value="${p}">${p}</option>`).join("");
+
+  posSelect.disabled = allowedPositions.length === 0;
+}
+
+function wireByeDisablesPositions() {
   document.querySelectorAll(".ko-init-group").forEach(sel => {
-    const handler = async () => {
-      const matchId = sel.dataset.matchId;
-      const slot = sel.dataset.slot;
-      const stageId = sel.dataset.sourceStage; // you already include data-source-stage in HTML
+    sel.addEventListener("change", async () => {
+      const posSel = document.querySelector(
+        `.ko-init-pos[data-match-id="${sel.dataset.matchId}"][data-slot="${sel.dataset.slot}"]`
+      );
 
-      const posSel = document.querySelector(`.ko-init-pos[data-match-id="${matchId}"][data-slot="${slot}"]`);
-      if (!posSel) return;
-
-      if (sel.value === "__BYE__" || !sel.value) {
-        posSel.value = "";
-        posSel.disabled = true;
-        posSel.innerHTML = `<option value="">Pos…</option>`;
-        return;
-      }
-
-      posSel.disabled = false;
-
-      try {
-		const size = await getGroupSize(stageId, sel.value);
-		const targetStageId = document.getElementById("ko-init-target-stage")?.value;
-
-		if (!size || !targetStageId) {
-		  setPosOptions(posSel, []);
-		  return;
-		}
-
-		const allowedPositions = await computeAllowedPositionsForTarget({
-		  sourceStageId: stageId,
-		  targetStageId,
-		  groupSize: size
-		});
-		
-		console.log("KO allowed positions", {
-		  sourceStageId: stageId,
-		  targetStageId,
-		  groupSize: size,
-		  allowedPositions
-		});
-
-		setPosOptions(posSel, allowedPositions);
-		posSel.disabled = allowedPositions.length === 0;
-      } catch (e) {
-        console.error(e);
-        // fallback rather than breaking UI
-        setPosOptions(posSel, []);
-		posSel.disabled = true;
-      }
-    };
-
-    sel.addEventListener("change", handler);
-    handler(); // initial state
+      await populateKoPositionSelect({
+        groupSelect: sel,
+        posSelect: posSel,
+        sourceStageId: sel.dataset.sourceStage,
+        targetStageId: document.getElementById("ko-init-target-stage")?.value
+      });
+    });
   });
 }
 
@@ -7101,7 +7488,11 @@ async function resolveKoInitialisation({
     .select("id, match_meta, status, match_date, bracket_meta")
     .eq("stage_id", targetStageId)
     .eq("status", "structure")
-    .order("match_date", { ascending: true });
+	
+	const orderedKoMatches = (koMatches || []).sort((a, b) =>
+	  Number(a.bracket_meta?.order || 0) -
+	  Number(b.bracket_meta?.order || 0)
+	);
 
   if (kmErr) throw kmErr;
 
@@ -7137,6 +7528,22 @@ async function resolveKoInitialisation({
 
   if (gErr) throw gErr;
 
+  const participantsById = new Map();
+
+  (sourceMatches || []).forEach(m => {
+    if (isTeamTournament) {
+      if (m.team1?.id) participantsById.set(m.team1.id, m.team1.name);
+      if (m.team2?.id) participantsById.set(m.team2.id, m.team2.name);
+    } else {
+      if (m.player1?.id) participantsById.set(m.player1.id, m.player1.name);
+      if (m.player2?.id) participantsById.set(m.player2.id, m.player2.name);
+    }
+  });
+
+  const participants = [...participantsById.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   const config = DEFAULT_STANDINGS_CONFIG;
   const matchesByGroup = groupMatchesByGroup(sourceMatches);
 
@@ -7148,25 +7555,51 @@ async function resolveKoInitialisation({
     standingsByGroup.set(g.id, rows);
   }
 
+  const groupNameById = new Map((groups || []).map(g => [g.id, g.name]));
   const resolvedByMatch = new Map();
 
-  for (const m of (koMatches || [])) {
+  for (const m of orderedKoMatches) {
     const init = m.match_meta?.init;
     if (!init || init.source_stage_id !== sourceStageId) continue;
 
-    const out = { slot1: null, slot2: null };
+	const out = {
+	  matchOrder: Number(m.bracket_meta?.order || 0),
+	  slot1: null,
+	  slot2: null
+	};
 
     for (const slot of ["slot1", "slot2"]) {
       const spec = init[slot];
-      if (!spec?.group_id) continue;
 
-      if (spec.group_id === "__BYE__") {
-        out[slot] = { id: null, name: "BYE" };
+      if (!spec?.group_id) {
+        out[slot] = {
+          id: null,
+          name: "—",
+          sourceLabel: "Unmapped slot",
+          isBye: false
+        };
         continue;
       }
 
+      if (spec.group_id === "__BYE__") {
+        out[slot] = {
+          id: null,
+          name: "BYE",
+          sourceLabel: "BYE",
+          isBye: true
+        };
+        continue;
+      }
+
+      const sourceLabel = `${ordinal(spec.position)} place ${groupNameById.get(spec.group_id) || "Group"}`;
+
       if (!spec.position) {
-        out[slot] = { id: null, name: "—" };
+        out[slot] = {
+          id: null,
+          name: "—",
+          sourceLabel,
+          isBye: false
+        };
         continue;
       }
 
@@ -7175,7 +7608,9 @@ async function resolveKoInitialisation({
 
       out[slot] = {
         id: picked?.competitor_id || null,
-        name: picked?.name || "—"
+        name: picked?.name || "—",
+        sourceLabel,
+        isBye: false
       };
     }
 
@@ -7186,13 +7621,73 @@ async function resolveKoInitialisation({
     throw new Error("No saved bracket mapping found. Initialise the bracket first.");
   }
 
+  resolvedByMatch.participants = participants;
   return resolvedByMatch;
 }
 
 function renderKoFinaliseTable(resolvedByMatch) {
+  const participants = resolvedByMatch.participants || [];
+
+  const participantOptions = (selectedId) =>
+    `<option value="">— Select override —</option>` +
+    `<option value="__BYE__" ${selectedId === "__BYE__" ? "selected" : ""}>BYE</option>` +
+    participants.map(p => `
+      <option value="${p.id}" ${p.id === selectedId ? "selected" : ""}>
+        ${p.name}
+      </option>
+    `).join("");
+
+  const renderSlot = (matchId, slot, resolved) => {
+    const isBye = resolved?.isBye === true;
+    const resolvedId = resolved?.id || "";
+    const resolvedName = resolved?.name || "—";
+    const sourceLabel = resolved?.sourceLabel || "";
+
+    return `
+      <div class="ko-finalise-slot">
+        <div class="subtitle">${sourceLabel}</div>
+
+        <div class="ko-finalise-resolved">
+          ${resolvedName}
+        </div>
+
+        <label style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+          <input
+            type="checkbox"
+            class="ko-finalise-override-toggle"
+            data-match-id="${matchId}"
+            data-slot="${slot}"
+            ${isBye ? "disabled" : ""}
+          />
+          Override
+        </label>
+
+        <select
+          class="form-input ko-finalise-select"
+          data-match-id="${matchId}"
+          data-slot="${slot}"
+          data-resolved-id="${resolvedId}"
+          data-resolved-name="${resolvedName}"
+          ${isBye ? "" : "disabled"}
+        >
+          ${participantOptions(isBye ? "__BYE__" : resolvedId)}
+        </select>
+		
+		<input
+		  class="form-input ko-finalise-other"
+		  data-match-id="${matchId}"
+		  data-slot="${slot}"
+		  placeholder="Other / late arrival"
+		  disabled
+		/>
+      </div>
+    `;
+  };
+
   return `
     <div class="card" style="margin-top:8px;">
       <div class="section-title">Finalise advancement</div>
+
       <table class="standings-table" style="width:100%;">
         <thead>
           <tr>
@@ -7204,25 +7699,9 @@ function renderKoFinaliseTable(resolvedByMatch) {
         <tbody>
           ${[...resolvedByMatch.entries()].map(([matchId, slots], idx) => `
             <tr>
-              <td style="text-align:center;">${idx + 1}</td>
-              <td>
-                <input
-                  class="form-input ko-finalise-name"
-                  data-match-id="${matchId}"
-                  data-slot="slot1"
-                  data-id="${slots.slot1?.id || ""}"
-                  value="${slots.slot1?.name || ""}"
-                />
-              </td>
-              <td>
-                <input
-                  class="form-input ko-finalise-name"
-                  data-match-id="${matchId}"
-                  data-slot="slot2"
-                  data-id="${slots.slot2?.id || ""}"
-                  value="${slots.slot2?.name || ""}"
-                />
-              </td>
+              <td style="text-align:center;">${slots.matchOrder || idx + 1}</td>
+              <td>${renderSlot(matchId, "slot1", slots.slot1)}</td>
+              <td>${renderSlot(matchId, "slot2", slots.slot2)}</td>
             </tr>
           `).join("")}
         </tbody>
@@ -7235,7 +7714,7 @@ function renderKoFinaliseTable(resolvedByMatch) {
   `;
 }
 
-function readKoFinaliseSelections(resolvedByMatch) {
+async function readKoFinaliseSelections(resolvedByMatch) {
   const out = new Map();
 
   for (const [matchId, slots] of resolvedByMatch.entries()) {
@@ -7245,18 +7724,76 @@ function readKoFinaliseSelections(resolvedByMatch) {
     });
   }
 
-  document.querySelectorAll(".ko-finalise-name").forEach(input => {
-    const matchId = input.dataset.matchId;
-    const slot = input.dataset.slot;
-    const name = input.value.trim();
-    const id = input.dataset.id || null;
+  for (const sel of document.querySelectorAll(".ko-finalise-select")) {
+    const matchId = sel.dataset.matchId;
+    const slot = sel.dataset.slot;
+    if (!out.has(matchId)) continue;
 
-    if (!out.has(matchId)) return;
+    const toggle = document.querySelector(
+      `.ko-finalise-override-toggle[data-match-id="${matchId}"][data-slot="${slot}"]`
+    );
+
+    const other = document.querySelector(
+      `.ko-finalise-other[data-match-id="${matchId}"][data-slot="${slot}"]`
+    );
+
+    const otherName = other?.value?.trim() || "";
+    const useOverride = toggle?.checked || sel.value === "__BYE__";
+
+    if (!useOverride) {
+      out.get(matchId)[slot] = {
+        id: sel.dataset.resolvedId || null,
+        name: sel.dataset.resolvedName || "—"
+      };
+      continue;
+    }
+
+    if (otherName) {
+      let { data: player, error: findErr } = await window.supabaseClient
+        .from("players")
+        .select("id, name")
+        .eq("name", otherName)
+        .maybeSingle();
+
+      if (findErr) throw findErr;
+
+      if (!player) {
+        const { data: created, error: createErr } = await window.supabaseClient
+          .from("players")
+          .insert({
+            name: otherName,
+            is_guest: false
+          })
+          .select("id, name")
+          .single();
+
+        if (createErr) throw createErr;
+        player = created;
+      }
+
+      out.get(matchId)[slot] = {
+        id: player.id,
+        name: player.name
+      };
+
+      continue;
+    }
+
+    if (sel.value === "__BYE__") {
+      out.get(matchId)[slot] = {
+        id: null,
+        name: "BYE"
+      };
+      continue;
+    }
+
+    const selected = sel.options[sel.selectedIndex];
+
     out.get(matchId)[slot] = {
-      id: id || null,
-      name: name || "BYE"
+      id: sel.value || null,
+      name: selected?.textContent?.trim() || "—"
     };
-  });
+  }
 
   return out;
 }
@@ -7351,6 +7888,37 @@ async function resetKoStage({
 
     if (error) throw error;
   }
+}
+
+async function getFinalisedAdvancementIds({ sourceStageId, targetStageId, isTeamTournament }) {
+  const { data: targetMatches, error } = await window.supabaseClient
+    .from("matches")
+    .select(
+      isTeamTournament
+        ? "id, status, team1_id, team2_id, match_meta"
+        : "id, status, player1_id, player2_id, match_meta"
+    )
+    .eq("stage_id", targetStageId)
+    .in("status", ["scheduled", "live", "finished"]);
+
+  if (error) throw error;
+
+  const ids = new Set();
+
+  (targetMatches || []).forEach(m => {
+    const initSource = m.match_meta?.init?.source_stage_id;
+
+    // only count entries created/finalised from this source stage
+    if (initSource && initSource !== sourceStageId) return;
+
+    const a = isTeamTournament ? m.team1_id : m.player1_id;
+    const b = isTeamTournament ? m.team2_id : m.player2_id;
+
+    if (a) ids.add(a);
+    if (b) ids.add(b);
+  });
+
+  return ids;
 }
 
 async function propagateKoWinner(matchId) {

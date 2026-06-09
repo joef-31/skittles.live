@@ -269,19 +269,9 @@ window.initRealtimeSubscriptions = async function initRealtimeSubscriptions() {
 				  .eq("match_id", set.match_id)
 				  .order("set_number", { ascending: true });
 
-				await resetScoringStateForMatch(
-				  {
-					id: scoringMatch.matchId,
-					status: scoringMatch.status,
-					team1: scoringMatch.isTeamMatch ? { id: scoringMatch.p1Id, name: scoringMatch.p1Name } : null,
-					team2: scoringMatch.isTeamMatch ? { id: scoringMatch.p2Id, name: scoringMatch.p2Name } : null,
-					player1: !scoringMatch.isTeamMatch ? { id: scoringMatch.p1Id, name: scoringMatch.p1Name } : null,
-					player2: !scoringMatch.isTeamMatch ? { id: scoringMatch.p2Id, name: scoringMatch.p2Name } : null,
-					final_sets_player1: scoringMatch.setsP1,
-					final_sets_player2: scoringMatch.setsP2
-				  },
-				  sets
-				);
+				if (set.id === window.scoringCurrentSetId) {
+				  await syncScoringStateFromDB(set.id);
+				}
 			  }
 
 			  return;
@@ -473,74 +463,86 @@ function getLastThrowerPlayerId(sideKey) {
 // -----------------------------------------------------------
 
 async function checkSetWin() {
+  const setId = window.scoringCurrentSetId;
+
+  const sp1 = Number(window.scoringCurrentSetSP1 || 0);
+  const sp2 = Number(window.scoringCurrentSetSP2 || 0);
+
   let winningSide = null;
 
-  // 1️⃣ Detect a winning condition (SIDE, not ID)
-  if (scoringCurrentSetSP1 === 50 && scoringCurrentSetSP2 < 50) {
+  if (sp1 === 50 && sp2 < 50) {
     winningSide = "p1";
-  } else if (scoringCurrentSetSP2 === 50 && scoringCurrentSetSP1 < 50) {
+  } else if (sp2 === 50 && sp1 < 50) {
     winningSide = "p2";
   }
 
-  if (!winningSide) return false;
+  if (!winningSide || !setId) return false;
 
-  // 2️⃣ Resolve the ACTUAL PLAYER who won the set
-  const winningPlayerId = scoringMatch.isTeamMatch
-    ? getCurrentThrowerPlayerId()
-    : scoringMatch[`${winningSide}Id`];
+  const winningPlayerId = window.scoringMatch?.isTeamMatch
+    ? await getLastThrowerPlayerIdForSide(setId, winningSide)
+    : window.scoringMatch?.[`${winningSide}Id`];
+
+  console.log("[checkSetWin]", {
+    setId,
+    sp1,
+    sp2,
+    winningSide,
+    winningPlayerId
+  });
 
   if (!winningPlayerId) {
     console.error("[checkSetWin] No winning player could be resolved");
     return false;
   }
 
-  // 3️⃣ Persist set result (PLAYER id only — FK-safe)
-  const { error: setErr } = await window.supabaseClient
+  const { data: updatedSet, error: setErr } = await window.supabaseClient
     .from("sets")
     .update({
-      score_player1: scoringCurrentSetSP1,
-      score_player2: scoringCurrentSetSP2,
+      score_player1: sp1,
+      score_player2: sp2,
       winner_player_id: winningPlayerId,
       current_thrower: null
     })
-    .eq("id", scoringCurrentSetId);
+    .eq("id", setId)
+    .select("*")
+    .single();
 
   if (setErr) {
     console.error("[checkSetWin] failed to update set", setErr);
     return false;
   }
 
-  // 4️⃣ Update local match set counters
-  if (winningSide === "p1") scoringMatch.setsP1++;
-  if (winningSide === "p2") scoringMatch.setsP2++;
+  console.log("[checkSetWin] updated set", updatedSet);
+
+  if (winningSide === "p1") window.scoringMatch.setsP1++;
+  if (winningSide === "p2") window.scoringMatch.setsP2++;
 
   const { error: matchErr } = await window.supabaseClient
     .from("matches")
     .update({
-      final_sets_player1: scoringMatch.setsP1,
-      final_sets_player2: scoringMatch.setsP2
+      final_sets_player1: window.scoringMatch.setsP1,
+      final_sets_player2: window.scoringMatch.setsP2
     })
-    .eq("id", scoringMatch.matchId);
+    .eq("id", window.scoringMatch.matchId);
 
   if (matchErr) {
     console.error("[checkSetWin] failed to update match", matchErr);
   }
 
-  // 5️⃣ Advance local state
-  scoringMatch.currentSetNumber++;
-  scoringCurrentSetId = null;
-  scoringCurrentSetSP1 = 0;
-  scoringCurrentSetSP2 = 0;
-  scoringCurrentThrower = null;
-  scoringConsecutiveMisses = { p1: 0, p2: 0 };
+  window.scoringMatch.currentSetNumber++;
+  window.scoringCurrentSetId = null;
+  window.scoringCurrentSetSP1 = 0;
+  window.scoringCurrentSetSP2 = 0;
+  window.scoringCurrentThrower = null;
+  window.scoringConsecutiveMisses = { p1: 0, p2: 0 };
 
-  await recalcMatchSmallPoints(scoringMatch.matchId);
-  App.Features.Match.refreshMatchSets();
+  await recalcMatchSmallPoints(window.scoringMatch.matchId);
+  await App.Features.Match.refreshMatchSets?.();
 
-  updateScoringHeaderUI();
-  syncStartSetUI();
-  updateStartSetVisibility();
-  syncHeaderTikku();
+	updateScoringHeaderUI();
+	syncStartSetUI();
+	updateStartSetVisibility();
+	syncHeaderTikku();
 
   return true;
 }

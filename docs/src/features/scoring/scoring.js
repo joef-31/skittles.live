@@ -198,7 +198,10 @@ async function resetScoringStateForMatch(match, sets) {
 		matchId: match.id,
 		tournamentId: match.tournament?.id,
 		editionId: match.edition_id,
-		minTeamSize: Number(match.min_team_size) || 0,
+		minTeamSize:
+		  Number(match.min_team_size) ||
+		  Number(window.scoringMatch?.minTeamSize) ||
+		  0,
 		isTeamMatch,
 
 		// competitor IDs (player OR team)
@@ -237,15 +240,23 @@ async function resetScoringStateForMatch(match, sets) {
 
 	if (!lastThrow?.set_id) {
 	  // no throws in match → no active set yet
-	  const maxSetNum = (effectiveSets || []).length
-		? Math.max(...effectiveSets.map(s => Number(s.set_number) || 0))
-		: 0;
+		const completedSetNumbers = (effectiveSets || [])
+		  .filter(s =>
+			s.winner_player_id ||
+			Number(s.score_player1 || 0) === 50 ||
+			Number(s.score_player2 || 0) === 50
+		  )
+		  .map(s => Number(s.set_number) || 0);
 
-	  window.scoringMatch.currentSetNumber = maxSetNum + 1;
-	  window.scoringCurrentSetId = null;
-	  window.scoringCurrentSetSP1 = 0;
-	  window.scoringCurrentSetSP2 = 0;
-	  window.scoringCurrentThrower = null;
+		const maxCompletedSet = completedSetNumbers.length
+		  ? Math.max(...completedSetNumbers)
+		  : 0;
+
+		window.scoringMatch.currentSetNumber = maxCompletedSet + 1;
+		window.scoringCurrentSetId = null;
+		window.scoringCurrentSetSP1 = 0;
+		window.scoringCurrentSetSP2 = 0;
+		window.scoringCurrentThrower = null;
 
 	} else {
 	  // last throw determines the active set number/id
@@ -303,10 +314,19 @@ async function resetScoringStateForMatch(match, sets) {
 		window.scoringCurrentThrower = currentSet.current_thrower;
 		window.scoringMatch.currentSetNumber = currentSet.set_number;
 	} else {
-		const maxSet = (effectiveSets || []).length
-			? Math.max(...(effectiveSets || []).map(s => s.set_number || 0))
-			: 0;
-		window.scoringMatch.currentSetNumber = maxSet + 1;
+		const completedSetNumbers = (effectiveSets || [])
+		  .filter(s =>
+			s.winner_player_id ||
+			Number(s.score_player1 || 0) === 50 ||
+			Number(s.score_player2 || 0) === 50
+		  )
+		  .map(s => Number(s.set_number) || 0);
+
+		const maxCompletedSet = completedSetNumbers.length
+		  ? Math.max(...completedSetNumbers)
+		  : 0;
+
+		window.scoringMatch.currentSetNumber = maxCompletedSet + 1;
 		window.scoringCurrentSetId = null;
 		window.scoringCurrentSetSP1 = 0;
 		window.scoringCurrentSetSP2 = 0;
@@ -527,62 +547,84 @@ window.scoringStartSet = scoringStartSet;
 async function scoringAddScore(score, opts = {}) {
   if (!window.scoringMatch || !window.scoringCurrentSetId) return;
 
+  const throwerSide = window.scoringCurrentThrower;
   const isMiss = score === 0;
   const isFault = opts.isFault === true;
-  const isP1 = window.scoringCurrentThrower === "p1";
-  const playerKey = isP1 ? "p1" : "p2";
+  const playerKey = throwerSide === "p1" ? "p1" : "p2";
 
-  window.__localThrowInFlight = true;
+  try {
+    window.__localThrowInFlight = true;
+	
+	console.log("[scoringAddScore insert]", {
+	  setId: window.scoringCurrentSetId,
+	  setNumber: window.scoringMatch.currentSetNumber,
+	  throwerSide,
+	  playerId: getCurrentThrowerPlayerId(),
+	  score
+	});
 
-  await dbInsertThrow({
-    matchId: window.scoringMatch.matchId,
-    setId: window.scoringCurrentSetId,
-    setNumber: window.scoringMatch.currentSetNumber,
-    throwerSide: window.scoringCurrentThrower,
-    playerId: getCurrentThrowerPlayerId(),
-    score,
-    isMiss,
-    isFault
-  });
+    await dbInsertThrow({
+      matchId: window.scoringMatch.matchId,
+      setId: window.scoringCurrentSetId,
+      setNumber: window.scoringMatch.currentSetNumber,
+      throwerSide,
+      playerId: getCurrentThrowerPlayerId(),
+      score,
+      isMiss,
+      isFault
+    });
 
-  window.__localThrowInFlight = false;
+    const { data: setThrows, error: setThrowsErr } = await window.supabaseClient
+      .from("throws")
+      .select("*")
+      .eq("set_id", window.scoringCurrentSetId)
+      .order("throw_number", { ascending: true });
 
-  const { data: setThrows, error: setThrowsErr } = await window.supabaseClient
-    .from("throws")
-    .select("*")
-    .eq("set_id", window.scoringCurrentSetId)
-    .order("throw_number", { ascending: true });
+    if (setThrowsErr) {
+      console.error("[scoringAddScore] failed to reload set throws", setThrowsErr);
+      return;
+    }
 
-  if (setThrowsErr) {
-    console.error("[scoringAddScore] failed to reload set throws", setThrowsErr);
-    return;
+    const rebuilt = rebuildSetStateFromThrows(setThrows || []);
+
+    const { error: setUpdateErr } = await window.supabaseClient
+      .from("sets")
+      .update({
+        score_player1: rebuilt.sp1,
+        score_player2: rebuilt.sp2,
+        current_thrower: rebuilt.nextThrower
+      })
+      .eq("id", window.scoringCurrentSetId);
+
+    if (setUpdateErr) {
+      console.error("[scoringAddScore] failed to update set", setUpdateErr);
+      return;
+    }
+
+    await recalcMatchSmallPoints(scoringMatch.matchId);
+
+    // CRITICAL: rebuild local state BEFORE win/miss checks
+    await syncScoringStateFromDB(window.scoringCurrentSetId);
+
+    if (await checkThreeMissLoss(playerKey)) {
+      await App.Features.Match.refreshMatchSets?.();
+      return;
+    }
+
+    if (await checkSetWin()) {
+      await App.Features.Match.refreshMatchSets?.();
+      return;
+    }
+
+    await App.Features.Match.refreshMatchSets?.();
+	
+	await App.Features.Match.refreshExpandedSetThrows?.(
+	  window.scoringCurrentSetId
+	);
+
+  } finally {
+    window.__localThrowInFlight = false;
   }
-
-  const rebuilt = rebuildSetStateFromThrows(setThrows || []);
-
-  await window.supabaseClient
-    .from("sets")
-    .update({
-      score_player1: rebuilt.sp1,
-      score_player2: rebuilt.sp2,
-      current_thrower: rebuilt.nextThrower
-    })
-    .eq("id", window.scoringCurrentSetId);
-
-  await recalcMatchSmallPoints(scoringMatch.matchId);
-
-  if (await checkThreeMissLoss(playerKey)) {
-    return;
-  }
-
-  if (await checkSetWin()) {
-    return;
-  }
-
-  await syncScoringStateFromDB(window.scoringCurrentSetId);
-
-  syncTeamLineupsUI?.();
-  syncHeaderTikku();
 }
 
 function applyScore(before, score, isFault) {
@@ -754,6 +796,18 @@ async function recalcMatchSmallPoints(matchId) {
 	updateMatchSPUI(sp1, sp2);
 }
 
+async function deleteFutureSetsAfterUndo(matchId, activeSetNumber) {
+  const { error } = await window.supabaseClient
+    .from("sets")
+    .delete()
+    .eq("match_id", matchId)
+    .gt("set_number", activeSetNumber);
+
+  if (error) {
+    console.error("[deleteFutureSetsAfterUndo] failed", error);
+  }
+}
+
 async function scoringUndo() {
 	if (!scoringMatch) return;
 
@@ -780,6 +834,8 @@ async function scoringUndo() {
 
 	const setNumber = lastThrow.set_number;
 	const setId = lastThrow.set_id;
+	
+	await deleteFutureSetsAfterUndo(matchId, setNumber);
 
 	if (!setNumber || !setId) {
 		console.error("Undo: last throw missing set_number or set_id");
@@ -828,24 +884,52 @@ async function scoringUndo() {
 	// CASE: first throw undone → abandon the set
 	// --------------------------------------------------
 	if ((remainingThrows || []).length === 0) {
+	  const previousSetNumber = Math.max(0, Number(setNumber) - 1);
 
 	  await window.supabaseClient
 		.from("sets")
 		.delete()
-		.eq("id", setId);
+		.eq("match_id", matchId)
+		.gt("set_number", previousSetNumber);
 
-	  window.scoringCurrentSetId = null;
-	  window.scoringCurrentThrower = null;
-	  window.scoringCurrentSetSP1 = 0;
-	  window.scoringCurrentSetSP2 = 0;
+	  const { data: previousSet, error: prevSetErr } = await window.supabaseClient
+		.from("sets")
+		.select("*")
+		.eq("match_id", matchId)
+		.eq("set_number", previousSetNumber)
+		.maybeSingle();
 
-	  scoringMatch.currentSetNumber =
-		Math.max(1, scoringMatch.currentSetNumber - 1);
+	  if (prevSetErr) {
+		console.error("Undo: failed to load previous set:", prevSetErr);
+		return;
+	  }
 
-	  updateScoringHeaderUI();
-	  syncLiveSetScoreUI();
+	  const previousSetIsUnfinished =
+		previousSet?.id &&
+		!previousSet.winner_player_id &&
+		(
+		  Number(previousSet.score_player1 || 0) > 0 ||
+		  Number(previousSet.score_player2 || 0) > 0
+		);
+
+	  if (previousSetIsUnfinished) {
+		scoringMatch.currentSetNumber = previousSet.set_number;
+		await syncScoringStateFromDB(previousSet.id);
+	  } else {
+		window.scoringCurrentSetId = null;
+		window.scoringCurrentThrower = null;
+		window.scoringCurrentSetSP1 = 0;
+		window.scoringCurrentSetSP2 = 0;
+		scoringMatch.currentSetNumber = Number(setNumber);
+
+		updateScoringHeaderUI();
+		syncLiveSetScoreUI();
+		updateStartSetVisibility();
+		syncHeaderTikku();
+	  }
+
+	  await App.Features.Match.refreshMatchSets?.();
 	  updateStartSetVisibility();
-	  syncHeaderTikku();
 
 	  return;
 	}
@@ -942,6 +1026,9 @@ async function scoringUndo() {
 	// 9. Update local JS state for current set
 	scoringMatch.currentSetNumber = setNumber;
 	window.scoringCurrentSetId = setId;
+	window.scoringCurrentSetSP1 = newSP1;
+	window.scoringCurrentSetSP2 = newSP2;
+	window.scoringCurrentThrower = nextThrower;
 	
 	// Team matches: recompute which player is "next" for each side
 	if (scoringMatch?.isTeamMatch) {
@@ -968,8 +1055,22 @@ async function scoringUndo() {
 	}
 
 // 10. Update scoring console UI (state-driven)
-	await syncScoringStateFromDB(setId); // use the setId you already have, not window-scoped
-	
+	await syncScoringStateFromDB(setId);
+
+	window.scoringCurrentSetId = setId;
+	window.scoringCurrentSetSP1 = newSP1;
+	window.scoringCurrentSetSP2 = newSP2;
+	window.scoringCurrentThrower = nextThrower;
+	window.scoringMatch.currentSetNumber = setNumber;
+
+	if (typeof App?.Features?.Match?.refreshMatchSets === "function") {
+	  await App.Features.Match.refreshMatchSets();
+	}
+
+	updateScoringHeaderUI();
+	syncLiveSetScoreUI();
+	syncTeamLineupsUI?.();
+	syncHeaderTikku();
 	updateStartSetVisibility();
 }
 
@@ -1076,6 +1177,8 @@ function syncStartSetUI() {
 
   btnP1.onclick = () => scoringStartSet("p1");
   btnP2.onclick = () => scoringStartSet("p2");
+  
+  wireEndMatchButton();
 
   if (scoringMatch.sideModel?.p1?.type === "team") {
     renderSetLineupSlots();
@@ -1328,9 +1431,13 @@ function deriveTeamRotationFromThrows(throwsArr) {
     return { nextSide: null, p1Index: 0, p2Index: 0 };
   }
 
-  if (arr.length === 0) {
-    return { nextSide: null, p1Index: 0, p2Index: 0 };
-  }
+	if (arr.length === 0) {
+	  return {
+		nextSide: window.scoringCurrentThrower || null,
+		p1Index: 0,
+		p2Index: 0
+	  };
+	}
 
   // Sort by throw_number
   arr.sort((a, b) => Number(a.throw_number) - Number(b.throw_number));
@@ -1388,6 +1495,37 @@ function deriveTeamRotationFromThrows(throwsArr) {
   const p2Index = p2Throws % p2Lineup.length;
 
   return { nextSide, p1Index, p2Index };
+}
+
+function getPlayerIdForSideAtThrow(sideKey) {
+  if (!window.scoringMatch) return null;
+
+  const side = window.scoringMatch.sideModel?.[sideKey];
+  if (!side) return null;
+
+  if (side.type === "player") return side.id;
+
+  if (!Array.isArray(side.lineup) || !side.lineup.length) return null;
+
+  return side.lineup[side.currentIndex] ?? null;
+}
+
+async function getLastThrowerPlayerIdForSide(setId, sideKey) {
+  const { data, error } = await window.supabaseClient
+    .from("throws")
+    .select("player_id")
+    .eq("set_id", setId)
+    .eq("side", sideKey)
+    .order("throw_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[getLastThrowerPlayerIdForSide] failed", error);
+    return null;
+  }
+
+  return data?.player_id || null;
 }
 
 function syncThrowstripUI() {
@@ -1455,14 +1593,34 @@ async function syncScoringStateFromDB(setId) {
 
 	// --- TEAM MATCH ROTATION (AUTHORITATIVE) ---
 	if (window.scoringMatch?.isTeamMatch) {
+	  const { data: lineups, error: lineupErr } = await window.supabaseClient
+		.from("set_lineups")
+		.select("team_id, player_id")
+		.eq("set_id", setId);
+
+	  if (lineupErr) {
+		console.error("[syncScoringStateFromDB] failed to load set lineups", lineupErr);
+	  } else if (Array.isArray(lineups)) {
+		window.scoringMatch.sideModel.p1.lineup = lineups
+		  .filter(r => r.team_id === window.scoringMatch.p1Id)
+		  .map(r => r.player_id);
+
+		window.scoringMatch.sideModel.p2.lineup = lineups
+		  .filter(r => r.team_id === window.scoringMatch.p2Id)
+		  .map(r => r.player_id);
+	  }
+
 	  const rot = deriveTeamRotationFromThrows(arr);
 
 	  window.scoringMatch.sideModel.p1.currentIndex = rot.p1Index ?? 0;
 	  window.scoringMatch.sideModel.p2.currentIndex = rot.p2Index ?? 0;
 
-	  window.scoringCurrentThrower = rot.nextSide ?? null;
+	  window.scoringCurrentThrower =
+		rot.nextSide ||
+		setRow.current_thrower ||
+		window.scoringCurrentThrower ||
+		null;
 	} else {
-	  // Singles: fall back to DB
 	  window.scoringCurrentThrower = setRow.current_thrower || null;
 	}
 
